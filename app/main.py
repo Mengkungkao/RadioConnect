@@ -1,0 +1,2243 @@
+"""LoRa Walkie-Talkie: the app itself.
+
+A push-to-talk voice and text terminal for the Whisplay HAT and a
+Waveshare SX126X LoRa HAT on one Pi Zero 2 W.
+
+The controls are MFruit OS's, the same in every MFruit app (the button
+and any USB or Bluetooth keyboard, through mfruit_sdk.input):
+
+    tap / Down           next row
+    2 clicks / Up        previous row
+    hold, release / Enter  open the row
+    4 clicks / Esc       back; from Home, leave the app
+    hold / Space         talk, on the talk screens (Start, its contacts,
+                         Talk, Range test) -- there 3 clicks opens the row
+
+**The main loop does not poll.** It renders, works out when the next
+thing genuinely needs to happen, and blocks on an Event until either
+that deadline or a real event -- a button edge, a received packet, a
+transmit-progress update -- wakes it. When the radio is quiet, the
+screen has dimmed and nothing is being reassembled, that wait is
+indefinite: the process makes no wakeups at all, the serial reader is
+parked in a kernel read, and the transmit thread is parked on an empty
+queue. Idle cost is as close to zero as Python allows, which is the
+whole point on a device meant to sit on a belt all day.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import signal
+import threading
+import time
+
+from app import board as board_module
+from app.audio import devices as audio_devices
+from app.audio.capture import CLIPPED_TOO_MUCH, Recorder
+from app.audio.codec2 import (Codec2, Codec2Unavailable, MODE_BY_NAME,
+                              NAME_BY_MODE, SAMPLE_RATE)
+from app.audio.playback import Player, cues_for, voice_for
+from app.config import settings as settings_module
+from app.config.settings import Contact
+from mfruit_sdk.input import (BACK, CHAR, ERASE, KEYBOARD, SELECT, TALK_END, TALK_START,
+                              InputController)
+from mfruit_sdk.status import StatusMonitor
+
+from app.chat import ChatController
+from app.radio import protocol
+from app.radio import modepins
+from app.config.settings import hostname_callsign
+from app.radio.link import LoraLink, NotPaired
+from app.radio.linkcheck import DISCONNECTED, IN_RANGE, WEAK, LinkMonitor
+from app.radio.sx126x import PortBusy, SX126x, port_conflicts
+from app.rangetest import RangeTest
+from app.store.inbox import Inbox
+from app.store import shared_radio
+from app.store.overrides import Overrides
+from app.store.roster import BROADCAST_NAME, Roster
+from app.ui import navigation, screens, theme
+from app.ui.display import Display
+from app.ui.editors import (ChoiceEditor, ClockEditor, ConfirmEditor,
+                            DigitEditor)
+from app.ui.screens import (CHAT, CHATS, CONTACTS, EDIT, HOME, IDLE, INBOX, PAIR,
+                            PLAYING, RANGE, RECORDING, REPLIES, SENDING, SETTINGS,
+                            START, STATUS, TALK, ViewState)
+from app.utils import battery, clock
+from app.utils.logger import get_logger
+from app.utils.single_instance import AlreadyRunning, SingleInstance
+
+log = get_logger("main")
+
+# Refresh cadence while something is visibly moving.
+#
+# Only recording animates. Every other radio state draws a static frame,
+# and redrawing it costs more than it shows: a full 240x280 push clocks
+# DC for about 11 ms, and DC is the module's M1 on this stack, so the
+# radio is deaf for the duration. Receiving used to refresh every 300 ms,
+# which over a three-fragment message meant roughly five redraws and 10%
+# of the message's air time spent deaf -- the app was reliably deafening
+# itself exactly while being spoken to.
+FRAME_INTERVAL = {RECORDING: 0.08}
+
+# A press shorter than this after the hold threshold is a slip, not speech.
+MIN_TALK_SECONDS = 0.4
+
+# How often to re-call an unlinked station while its Talk page is open.
+RECALL_SECONDS = 45.0
+
+# Pairing. A beacon is ~20 bytes -- about 50 ms of air at 9600 bps -- so
+# a full two-minute window costs a few seconds of the hour's 36.
+PAIR_BEACON_SECONDS = 3.0
+PAIR_WINDOW_SECONDS = 120.0
+# How long to wait for the other operator to accept before saying so.
+PAIR_ANSWER_SECONDS = 30.0
+# At most one reply a radio that is not pairing sends to a clashing one.
+CLASH_REPLY_SECONDS = 10.0
+
+# The link check (see app.radio.linkcheck). The first goes out soon after
+# start, so the paired list fills in without waiting a whole interval.
+FIRST_CHECK_SECONDS = 8.0
+# Checks stop while less than this share of the hour's airtime is left:
+# the budget is for talking, and a check can wait.
+CHECK_RESERVE = 0.25
+# A radio heard this recently needs no probe when its Talk page opens.
+FRESH_SECONDS = 60.0
+# Pings list the voice messages sent this long ago or less, so a radio
+# that was out of range when one went can ask for it once back.
+RECENT_SECONDS = 30 * 60
+# How often a missed or broken message is asked for, at most.
+MAX_FETCHES = 2
+
+# Settings > Voice quality: Codec2 modes, clearest first. Scored with STOI
+# (0-1, intelligibility) on recorded speech through the whole path:
+# 3200 0.866, 1600 0.83, 700C 0.73.
+VOICE_QUALITIES = (("Clear", "3200"), ("Balanced", "1600"), ("Most messages", "700C"))
+
+# Names offered under Settings > Name, after this machine's hostname.
+CALLSIGNS = ("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf",
+             "Hotel", "India", "Juliet", "Kilo", "Lima", "Mike", "November",
+             "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform",
+             "Victor", "Whiskey", "X-ray", "Yankee", "Zulu")
+
+
+class WalkieApp:
+    # Defaults for state that __init__ would otherwise have to set before
+    # anything can run; tests build the app without hardware via __new__.
+    link = None
+    chat = None
+    shared_radio = False        # True once the SDK's shared radio store is in use
+    # What to say when there is no link: why the radio did not open.
+    radio_offline = "radio offline"
+    keyring = None
+    _pending_pair = None
+    _parents = None
+    _target = (protocol.BROADCAST, BROADCAST_NAME)
+    _pairing = False
+    _pairing_until = 0.0
+    _pairing_with = None
+    _pair_found = None
+    _pair_beacon_due = 0.0
+    _last_clash_reply = -CLASH_REPLY_SECONDS
+    _return_screen = SETTINGS
+    _warned_config_mode = False
+    monitor = None
+    range_test = None
+    _check_due = float("inf")
+    _ping_seq = 0
+    # src -> when an outstanding request for a message again gives up.
+    _retrieving = None
+    # (src, msg_id, total) -> times a missed message was asked for.
+    _fetch_tries = None
+    # Inbox item ids the operator asked to hear once they are whole.
+    _play_when_fetched = None
+
+    def __init__(self, settings):
+        self.settings = settings
+        # One Device ID, set of keys and contact list per device, shared with
+        # the Messenger: settle the ID before anything shows or uses it.
+        self.shared_radio = shared_radio.sync_identity(settings, Overrides(settings.data_dir))
+        self.running = True
+        self._closing = False
+        self._wake = threading.Event()
+        self._exit_reason = "normal"
+
+        # --- display and input -----------------------------------------
+        self.board, self.mode = board_module.acquire_board(
+            on_foreground_acquired=self._on_foreground
+        )
+        self.display = Display(self.board, settings)
+        self.state = ViewState(
+            callsign=settings.identity.callsign,
+            address=settings.radio.address,
+            channel=settings.radio.privacy_channel,
+            frequency_mhz=settings.radio.frequency_mhz,
+            max_record_seconds=settings.audio.max_record_seconds,
+        )
+
+        # The button and any USB / Bluetooth keyboard, as MFruit OS actions.
+        self.input = InputController(
+            self._on_action,
+            talk=self._can_talk,
+            typing=lambda: self.chat is not None and self.chat.composing,
+            active=lambda: self.foregrounded,
+            on_armed=self._on_armed,
+            debounce_ms=settings.input.debounce_ms,
+            click_window_ms=settings.input.click_window_ms,
+            talk_press_ms=settings.input.hold_ms,
+            long_press_ms=settings.input.long_press_ms,
+            app_id=board_module.APP_ID,    # MFruit OS hands its keys to this app by id
+        )
+        self.input.attach(self.board)
+        # WiFi level for the MFruit OS status bar (battery comes from app.utils.battery).
+        self.status = StatusMonitor(interval=15.0, on_change=lambda _s: self._wake.set())
+        for hook, handler in (("on_exit_request", self._on_exit_request),
+                              ("on_focus_revoked", self._on_focus_revoked)):
+            if hasattr(self.board, hook):
+                getattr(self.board, hook)(handler)
+
+        # --- storage ----------------------------------------------------
+        data_dir = settings.data_dir
+        self.overrides = Overrides(data_dir)
+        self.keyring = shared_radio.open_keyring(data_dir)
+        self._merge_shared_contacts()
+        clock.set_offset(self.overrides.clock_offset)
+        self.roster = Roster(settings.contacts, data_dir)
+        self.inbox = Inbox(data_dir)
+        self.state.inbox = self.inbox.items
+        self.state.unread = self.inbox.unread
+        self.chat = ChatController(self)
+        self.state.replies = self.chat.reply_items()
+
+        # --- audio ------------------------------------------------------
+        self.codec = None
+        self.codec_mode = MODE_BY_NAME.get(settings.audio.codec_mode,
+                                           MODE_BY_NAME["700C"])
+        try:
+            self.codec = Codec2(self.codec_mode)
+            self.state.codec_name = NAME_BY_MODE.get(self.codec_mode, "700C")
+        except Codec2Unavailable as exc:
+            log.error("codec2 unavailable: %s", exc)
+
+        capture_device = audio_devices.resolve(
+            settings.audio.capture_device, "capture", settings.audio.preferred_card)
+        playback_device = audio_devices.resolve(
+            settings.audio.playback_device, "playback", settings.audio.preferred_card)
+        audio_devices.set_mic_level(capture_device, settings.audio.mic_level)
+        self.recorder = Recorder(capture_device, settings.audio.max_record_seconds)
+        self.player = Player(playback_device)
+
+        # This station's own sound. Beeps identify who as well as what,
+        # which matters when two identical Pis sit on the same desk.
+        self.cues = cues_for(settings.radio.address, settings.identity.callsign)
+        clashing = [c.name for c in settings.contacts
+                    if c.address != settings.radio.address
+                    and voice_for(c.address) == self.cues.pitch]
+        if clashing:
+            log.warning(
+                "%s share this station's cue pitch (%d Hz), so their beeps "
+                "will sound identical to ours; change one address to separate "
+                "them", ", ".join(clashing), self.cues.pitch,
+            )
+        log.info("cue pitch %d Hz for %s (address %d)",
+                 self.cues.pitch, settings.identity.callsign, settings.radio.address)
+        self._refresh_audio_state()
+
+        # --- radio ------------------------------------------------------
+        self.radio = None
+        self.link = None
+        # Before the radio opens: a request can arrive the moment it does.
+        self._pending_pair = None
+        self._parents = {}
+        self.monitor = LinkMonitor(settings.radio.link_check_seconds)
+        self._fetch_state()
+        self._check_due = time.monotonic() + FIRST_CHECK_SECONDS
+        self._open_radio()
+
+        self._playback_lock = threading.Lock()
+        self._last_recall = 0.0
+        self._display_stale = False
+        # The screen cannot dim on this build -- the backlight pin is the
+        # radio's M0 -- so the charge left is worth showing.
+        self.battery = battery.Monitor()
+        self._warned_critical = False
+        self._actions = self._build_actions()
+        self._refresh_entries()
+        self._refresh_menus()
+
+    # --- setup helpers -------------------------------------------------
+    def _open_radio(self):
+        radio_settings = self.settings.radio
+        mode_pins = tuple(radio_settings.mode_pins) if radio_settings.mode_pins else None
+        try:
+            self.radio = SX126x(
+                port=radio_settings.port, addr=radio_settings.address,
+                freq_mhz=radio_settings.frequency_mhz,
+                uart_baud=radio_settings.uart_baud, mode_pins=mode_pins,
+            )
+        except PortBusy as exc:
+            # The desktop starts an app without stopping the one before.
+            log.error("%s. One app per radio: quit it, then open WalkieTalkie "
+                      "again.", exc)
+            holder = exc.holders[0] if exc.holders else "the other app"
+            self.radio_offline = f"radio busy: quit {holder}"
+            self.state.radio_note = self.radio_offline
+            self.state.flash(self.radio_offline, 10.0)
+            return
+        except Exception as exc:
+            log.error("radio unavailable on %s: %s", radio_settings.port, exc)
+            self.state.flash("radio offline", 6.0)
+            return
+        self.link = LoraLink(
+            self.radio, air_speed=radio_settings.air_speed,
+            duty_cycle_percent=radio_settings.duty_cycle_percent,
+            callsign=self.settings.identity.callsign,
+            addr=radio_settings.address, token=self.overrides.node_token,
+            keyring=self.keyring, channel=radio_settings.privacy_channel,
+        )
+        # The module is deaf unless M0/M1 are both low, and on this
+        # hardware the LCD drives those pins. Say so rather than letting
+        # every transmission succeed into nothing.
+        # Check and report on where the pins physically are, not on which
+        # ones we drive: with the stock jumpers we drive none of them and
+        # the module is still at the LCD's mercy.
+        wired = radio_settings.wired_mode_pins or [22, 27]
+        pins = tuple(wired)[:2]
+
+        # The backlight pin doubles as the module's M0 on this stack, and
+        # dimming it is PWM -- which would toggle the radio's mode a
+        # thousand times a second. Hearing beats saving the backlight, so
+        # brightness is pinned and the idle policy stands down.
+        if modepins.conflicts_with_backlight(pins):
+            self.display.lock_brightness(
+                f"GPIO{modepins.WHISPLAY_BACKLIGHT_BCM} is both the LCD "
+                "backlight and the radio's M0; dimming it is PWM and would "
+                "deafen the radio"
+            )
+            self.state.brightness_locked = True
+
+        health = modepins.check_and_warn(*pins)
+        self.state.radio_deaf = health["readable"] and not health["transparent"]
+        self.state.radio_note = health.get("detail", "")
+        if self.state.radio_deaf:
+            self.state.flash("radio deaf: check M0/M1", 10.0)
+
+        shared = port_conflicts(radio_settings.port)
+        if shared:
+            log.error(
+                "the LoRa port %s is shared: %s. Whatever else reads it takes "
+                "bytes meant for the radio, so messages arrive broken or not "
+                "at all, and a login shell hangs the port up when it restarts. "
+                "Run MFruit OS's radio setup once over SSH: bash "
+                "~/.whisplay-os/system/current/scripts/setup-radio.sh",
+                radio_settings.port, "; ".join(shared))
+            self.state.radio_note = "LoRa port shared: run setup"
+            self.state.flash("LoRa port shared: run radio setup", 10.0)
+
+        self.link.on_message(self._on_radio_message)
+        self.link.on_tx_progress(self._on_tx_progress)
+        self.link.on_sent(lambda label, ok: self.chat and self.chat.on_sent(label, ok))
+        self.link.on_hello(self._on_hello)
+        self.link.on_clash(self._on_clash)
+        self.link.on_retrieve(self._on_retrieve)
+        self.link.start()
+
+    def _refresh_audio_state(self):
+        can_record = self.recorder.available and self.codec is not None
+        can_play = self.player.available and self.codec is not None
+        self.state.audio_ok = can_record and can_play
+        if self.codec is None:
+            self.state.audio_note = "codec2 missing"
+        elif not self.recorder.available and not self.player.available:
+            self.state.audio_note = audio_devices.diagnose(
+                self.settings.audio.preferred_card)
+        elif not self.recorder.available:
+            self.state.audio_note = "no microphone"
+        elif not self.player.available:
+            self.state.audio_note = "no speaker"
+        else:
+            self.state.audio_note = audio_devices.diagnose(
+                self.settings.audio.preferred_card)
+
+    def _refresh_entries(self):
+        self.state.entries = self.roster.entries()
+        self.state.selected_index = self.roster.selected_index % max(
+            1, len(self.state.entries))
+        paired = self.keyring.is_paired if self.keyring else (lambda _a: True)
+        self.state.unpaired = {e.address for e in self.state.entries
+                               if not paired(e.address)}
+        addr, name = self._target
+        entry = self.roster.entry(addr)
+        self.state.target_address = addr
+        self.state.target_name = entry.name if entry else name
+        self.state.target_heard = entry.status if entry else ""
+        if self.monitor is not None:
+            self.monitor.watch(self._paired_addresses(), time.monotonic())
+
+    def _paired_addresses(self) -> list:
+        """Contacts we hold keys for: the radios the link check watches."""
+        if self.keyring is None:
+            return []
+        contacts = {c.address for c in self.settings.contacts}
+        return [addr for addr in self.keyring.paired if addr in contacts]
+
+    def _name_of(self, addr: int) -> str:
+        entry = self.roster.entry(addr)
+        return entry.name if entry else f"node {addr}"
+
+    # --- board callbacks -----------------------------------------------
+    def _on_foreground(self):
+        self.display.invalidate()
+        self.display.poke()
+        self._wake.set()
+
+    def _on_exit_request(self, *_args):
+        log.info("daemon asked us to exit")
+        self.stop("daemon")
+
+    def _on_focus_revoked(self, *_args):
+        """Stop drawing; the radio keeps running.
+
+        Deliberately passive. The framebuffer is gone, so drawing would
+        write into a torn-down mapping, and grabbing the screen back
+        would take it from whatever the user just switched to. When the
+        daemon decides to hand it back it says so, and
+        `board.watch_foreground_grants` re-attaches on that event.
+        """
+        if self._closing:
+            return
+        log.info("focus revoked; still listening, waiting for the screen back")
+        try:
+            self.board.foreground_ready = False
+        except Exception:
+            pass
+        # Keys typed into whatever has the screen now are not ours.
+        self.input.reset()
+
+    # --- input -----------------------------------------------------------
+    def _on_armed(self, armed: bool):
+        """A hold passed the threshold off a talk screen: show what release does."""
+        self.state.armed = armed
+        self._wake.set()
+
+    def _can_talk(self) -> bool:
+        return navigation.can_talk(self.state.screen, self.state.back_selected)
+
+    def _on_action(self, action):
+        """One MFruit OS input action, from the button or a keyboard."""
+        if action.name == TALK_START:
+            if self.display.screen_off:
+                self.display.poke()
+                self._wake.set()
+                return  # waking a dark talk page must not open the microphone
+            self._on_talk_start()
+            return
+        if action.name == TALK_END:
+            self._on_talk_end(action.held)
+            return
+        # A press on a blanked screen means "wake up", not "do the thing
+        # that happens to be under the cursor". Acting on a gesture the
+        # operator could not see the target of is how you end up
+        # transmitting to the wrong station.
+        was_dark = self.display.screen_off
+        self.display.poke()
+        if was_dark and action.name != BACK:
+            log.info("%s consumed waking the screen", action.name)
+            self._wake.set()
+            return
+        if self.state.screen == EDIT and self.state.editor is not None:
+            self._editor_action(action)
+            self._wake.set()
+            return
+        if self.state.screen == CHAT and self._chat_keys(action):
+            self._wake.set()
+            return
+
+        if action.name == CHAR:
+            name = navigation.route_char(self.state.screen, action.char)
+        else:
+            name = navigation.route(
+                self.state.screen, action.name, inbox_empty=not self.inbox.items,
+                back_selected=self.state.back_selected,
+            )
+        self._dispatch(name)
+
+    def _chat_keys(self, action) -> bool:
+        """Typing in a conversation. True if the action was taken here."""
+        chat = self.chat
+        if chat is None:
+            return False
+        if chat.composing:
+            {SELECT: chat.submit, BACK: chat.cancel_compose, ERASE: chat.erase,
+             CHAR: lambda: chat.type_char(action.char)}.get(action.name, lambda: None)()
+            return True               # arrows and gestures do nothing mid-sentence
+        if action.name == CHAR and navigation.route_char(CHAT, action.char) is None:
+            chat.type_char(action.char)   # the first letter starts a text
+            return True
+        return False
+
+    def _dispatch(self, action):
+        if action is None:
+            return
+        if action == navigation.EXIT_APP:
+            self.stop("user")
+            return
+        handler = self._actions.get(action)
+        if handler is None:
+            log.warning("no handler for action %s", action)
+            return
+        handler()
+        self._wake.set()
+
+    def _build_actions(self) -> dict:
+        """Action name -> what it does. Keys must cover navigation's table."""
+        return {
+            navigation.NEXT_ITEM: self._next_item,
+            navigation.PREVIOUS_ITEM: lambda: self._next_item(-1),
+            navigation.OPEN_ITEM: self._open_item,
+            navigation.NEXT_CONTACT: self._next_contact,
+            navigation.PREVIOUS_CONTACT: lambda: self._next_contact(-1),
+            navigation.OPEN_TALK: self._open_talk,
+            navigation.OPEN_INBOX: self._open_inbox,
+            navigation.OPEN_STATUS: lambda: self._show(STATUS),
+            navigation.NEXT_MESSAGE: self._next_message,
+            navigation.PREVIOUS_MESSAGE: lambda: self._next_message(-1),
+            navigation.PLAY_SELECTED: self._play_selected,
+            navigation.REPLAY_LAST: self._replay_last,
+            navigation.OPEN_SETTINGS: self._open_settings,
+            navigation.NEXT_SETTING: self._next_setting,
+            navigation.PREVIOUS_SETTING: lambda: self._next_setting(-1),
+            navigation.OPEN_SETTING: self._open_setting,
+            navigation.NEXT_FOUND: self._next_found,
+            navigation.PREVIOUS_FOUND: lambda: self._next_found(-1),
+            navigation.PAIR_SELECTED: self._pair_selected,
+            navigation.NEXT_CHAT: lambda: self.chat.next_conversation(),
+            navigation.PREVIOUS_CHAT: lambda: self.chat.next_conversation(-1),
+            navigation.OPEN_CHAT: lambda: self.chat.open_conversation(),
+            navigation.NEXT_BUBBLE: lambda: self.chat.next_bubble(),
+            navigation.PREVIOUS_BUBBLE: lambda: self.chat.next_bubble(-1),
+            navigation.OPEN_BUBBLE: lambda: self.chat.open_bubble(),
+            navigation.NEXT_REPLY: lambda: self.chat.next_reply(),
+            navigation.PREVIOUS_REPLY: lambda: self.chat.next_reply(-1),
+            navigation.SEND_REPLY: lambda: self.chat.send_reply(),
+            navigation.MARK_SPOT: self._mark_spot,
+            navigation.PROBE_NOW: self._probe_now,
+            navigation.GO_BACK: self._go_back,
+        }
+
+    # --- where you are ---------------------------------------------------
+    def _show(self, screen: str):
+        """Go to `screen`, remembering where "back" returns to."""
+        current = self.state.screen
+        if self._parents is None:
+            self._parents = {}
+        if screen != current and current != EDIT:
+            self._parents[screen] = current
+        self.state.screen = screen
+
+    def _go_back(self):
+        parents = self._parents or {}
+        leaving = self.state.screen
+        self.state.screen = parents.get(self.state.screen, HOME)
+        if leaving == RANGE:
+            self._stop_range_test()
+        elif leaving == PAIR:
+            self._stop_pairing()
+        if self.state.screen == SETTINGS:
+            self._refresh_settings()
+        if leaving == CHAT and self.chat is not None:
+            self.chat.cancel_compose()
+        if self.state.screen in (CHATS, CHAT) and self.chat is not None:
+            self.chat.refresh()
+
+    # --- home and start menus ----------------------------------------------
+    def _home_items(self) -> list:
+        paired = len([e for e in self.roster.entries()
+                      if e.address not in self.state.unpaired])
+        unread, total = self.inbox.unread, len(self.inbox.items)
+        return [
+            {"key": "start", "label": "Talk",
+             "value": f"now talking to {self.state.target_name}"},
+            {"key": "chats", "label": "Chats",
+             "value": self._chats_summary()},
+            {"key": "receive", "label": "Receive",
+             "value": (f"{unread} new  ·  {total} in all" if unread
+                       else f"nothing new  ·  listening on ch {self.state.channel}")},
+            {"key": "pair", "label": "Pair devices",
+             "value": f"{paired} paired  ·  {self._reach_summary()}" if paired
+             else "none yet  ·  add another radio"},
+            {"key": "settings", "label": "Settings",
+             "value": "name, ID, privacy channel"},
+            {"key": "status", "label": "Status",
+             "value": "radio, signal, audio and power"},
+            # Temporary, for testing at distance; see app.rangetest.
+            {"key": "range", "label": "Range test",
+             "value": "probe a paired radio, log the signal"},
+            {"key": "back", "label": "Back to MFruit OS"},
+        ]
+
+    def _chats_summary(self) -> str:
+        texts = [i for i in self.inbox.items if getattr(i, "kind", "") == "text"]
+        unread = sum(1 for i in texts if not i.played and not i.outgoing)
+        if unread:
+            return f"{unread} new message{'s' if unread != 1 else ''}"
+        return "texts and voice, per radio" if not texts else f"{len(texts)} texts"
+
+    def _reach_summary(self) -> str:
+        """"Jarvis in range", or "1 of 3 in range": the paired radios now."""
+        statuses = self.state.link_status or {}
+        if not statuses:
+            return "add another radio"
+        reachable = [a for a, (s, _d) in statuses.items() if s in (IN_RANGE, WEAK)]
+        if len(statuses) == 1:
+            addr, (reach, _detail) = next(iter(statuses.items()))
+            return f"{self._name_of(addr)} {reach}"
+        return f"{len(reachable)} of {len(statuses)} in range"
+
+    def _start_items(self) -> list:
+        paired = len([e for e in self.roster.entries()
+                      if e.address not in self.state.unpaired])
+        return [
+            {"key": "all", "label": "To ALL",
+             "value": f"every paired radio on channel {self.state.channel}"},
+            {"key": "device", "label": "To a paired device",
+             "value": f"{paired} paired" if paired else "none yet: pair one first"},
+            {"key": "back", "label": "Back"},
+        ]
+
+    def _refresh_menus(self):
+        self.state.home_items = self._home_items()
+        self.state.start_items = self._start_items()
+
+    def _next_item(self, step: int = 1):
+        if self.state.screen == HOME:
+            self.state.home_index = (self.state.home_index + step) % len(self.state.home_items)
+        elif self.state.screen == START:
+            self.state.start_index = (self.state.start_index + step) % len(self.state.start_items)
+
+    def _open_item(self):
+        if self.state.screen == HOME:
+            key = self.state.home_items[self.state.home_index % len(self.state.home_items)]["key"]
+            {"start": lambda: self._show(START), "receive": self._open_inbox,
+             "chats": lambda: self.chat.open_list(),
+             "pair": self._start_pairing, "settings": self._open_settings,
+             "status": lambda: self._show(STATUS),
+             "range": self._start_range_test, "back": lambda: self.stop("user")}[key]()
+        elif self.state.screen == START:
+            key = self.state.start_items[self.state.start_index % len(self.state.start_items)]["key"]
+            if key == "all":
+                self._talk_to(protocol.BROADCAST, BROADCAST_NAME)
+            elif key == "device":
+                self.state.contacts_back = not self.state.entries
+                self._show(CONTACTS)
+            else:
+                self._go_back()
+
+    # --- who to talk to ------------------------------------------------------
+    def _talk_to(self, addr: int, name: str):
+        """Make `addr` the target, and open Talk on it."""
+        if addr != protocol.BROADCAST and not self._can_reach(addr, name):
+            return
+        self._target = (addr, name)
+        self._refresh_entries()
+        self._call(addr)
+        self._check_before_talking(addr)
+        self._show(TALK)
+
+    def _can_reach(self, addr: int, name: str) -> bool:
+        if self.link is not None and not self.link.can_send(addr):
+            self.state.flash(f"pair with {name} first", 3.0)
+            self.player.cue(self.cues.error)
+            return False
+        return True
+
+    def _open_talk(self):
+        entry = self.roster.selected()
+        if entry is None:
+            self.state.flash("no paired radios yet")
+            return
+        self._talk_to(entry.address, entry.name)
+
+    def _next_contact(self, step: int = 1):
+        count = len(self.state.entries)
+        index = count if self.state.contacts_back else self.state.selected_index
+        index = (index + step) % (count + 1)
+        self.state.contacts_back = index == count
+        if not self.state.contacts_back:
+            self.roster.selected_index = index
+        self._refresh_entries()
+
+    def _open_inbox(self):
+        self._show(INBOX)
+        self.state.inbox = self.inbox.items
+        self.state.inbox_index = 0
+        self.state.inbox_back = not self.inbox.items
+
+    def _next_message(self, step: int = 1):
+        count = len(self.inbox.items)
+        index = count if self.state.inbox_back else self.state.inbox_index
+        index = (index + step) % (count + 1)
+        self.state.inbox_back = index == count
+        if not self.state.inbox_back:
+            self.state.inbox_index = index
+
+    # --- handshake ----------------------------------------------------------
+    def _on_hello(self, peer, name: str):
+        """A paired station is calling. Called on the receive thread.
+
+        Its hello was sealed with our shared key, or the link would have
+        dropped it unread, so it is answered without asking: you paired
+        it deliberately, and confirming every boot would be noise. New
+        radios are added only by pairing.
+        """
+        if self.keyring is not None and not self.keyring.is_paired(peer.addr):
+            return False
+        self.state.flash(f"{name or peer.addr} connected")
+        self._wake.set()
+        return True
+
+    def _call(self, addr: int, force: bool = False):
+        """Say hello to a station so both ends know the link works."""
+        if self.link is None or addr == protocol.BROADCAST:
+            return
+        if not self.link.can_send(addr, protocol.HELLO):
+            return  # a contact from before pairing: no key to call it with
+        state = self.link.link_state(addr)
+        if not force and state in (protocol.LINK_LINKED, protocol.LINK_CALLING):
+            return
+        log.info("calling %d", addr)
+        self.link.send_hello(addr)
+        self._wake.set()
+
+    def _call_known_contacts(self, force: bool = False):
+        """On startup, tell every paired station we are on the air."""
+        for contact in self.settings.contacts:
+            if contact.address != protocol.BROADCAST:
+                self._call(contact.address, force=force)
+
+    def _link_states(self) -> dict:
+        if self.link is None:
+            return {}
+        return {addr: peer.link_state for addr, peer in self.link.peers.items()}
+
+    # --- focus ---------------------------------------------------------------
+    @property
+    def foregrounded(self) -> bool:
+        return bool(getattr(self.board, "foreground_ready", False))
+
+    # --- settings ---------------------------------------------------------
+    def _settings_items(self) -> list:
+        base = self.overrides.base_address
+        base_name = next(
+            (e.name for e in self.roster.entries() if e.address == base),
+            str(base) if base is not None else "not set",
+        )
+        return [
+            {"key": "name", "label": "Name",
+             "value": f"{self.settings.identity.callsign}  ·  what other radios see"},
+            {"key": "device_id", "label": "Device ID",
+             "value": f"{self.settings.radio.address}  ·  unique to this radio"},
+            {"key": "channel", "label": "Privacy channel",
+             "value": f"{self.settings.radio.privacy_channel}  ·  others are ignored"},
+            {"key": "voice", "label": "Voice quality",
+             "value": self._voice_summary(self.settings.audio.codec_mode)},
+            {"key": "base", "label": "Base station", "value": base_name},
+            {"key": "clock", "label": "Date & time",
+             "value": clock.now().strftime("%Y-%m-%d %H:%M") + "  ·  " + clock.describe()},
+            {"key": "reset", "label": "Reset all data",
+             "value": f"{len(self.inbox.items)} message(s), paired radios, keys",
+             "destructive": True},
+            {"key": "back", "label": "Back"},
+        ]
+
+    def _open_settings(self):
+        self._show(SETTINGS)
+        self.state.settings_index = 0
+        self.state.settings_items = self._settings_items()
+
+    def _next_setting(self, step: int = 1):
+        items = self.state.settings_items or self._settings_items()
+        self.state.settings_index = (self.state.settings_index + step) % len(items)
+
+    def _refresh_settings(self):
+        self.state.settings_items = self._settings_items()
+
+    def _open_setting(self):
+        items = self.state.settings_items or self._settings_items()
+        key = items[self.state.settings_index % len(items)]["key"]
+        opener = {
+            "name": self._edit_name, "device_id": self._edit_device_id,
+            "channel": self._edit_channel, "voice": self._edit_voice,
+            "base": self._edit_base,
+            "clock": self._edit_clock, "reset": self._edit_reset,
+            "back": self._go_back,
+        }[key]
+        opener()
+
+    def _begin_edit(self, editor, title: str, hint: str = ""):
+        # Where to go when it closes: an incoming call can interrupt any
+        # screen, and answering it should not strand you in Settings.
+        if self.state.screen != EDIT:
+            self._return_screen = self.state.screen
+        self.state.editor = editor
+        self.state.editor_title = title
+        self.state.editor_hint = hint
+        self.state.screen = EDIT
+
+    def _edit_name(self):
+        current = self.settings.identity.callsign
+        names = [hostname_callsign()] + list(CALLSIGNS)
+        if current not in names:
+            names.insert(0, current)  # a name set in config.yaml
+        choices = [(name, name) for name in names]
+        self._begin_edit(ChoiceEditor(choices, names.index(current)), "NAME",
+                         "paired radios learn it next time you call")
+
+    def _edit_device_id(self):
+        self._begin_edit(
+            DigitEditor(self.settings.radio.address, digits=5, maximum=65534),
+            "DEVICE ID",
+            "must be unique on the channel",
+        )
+
+    def _edit_channel(self):
+        choices = [(f"channel {n}", n) for n in protocol.CHANNELS]
+        current = self.settings.radio.privacy_channel
+        index = next((i for i, (_l, n) in enumerate(choices) if n == current), 0)
+        self._begin_edit(ChoiceEditor(choices, index), "CHANNEL",
+                         "only radios on the same channel hear you")
+
+    def _voice_summary(self, name: str) -> str:
+        label = next((l for l, n in VOICE_QUALITIES if n == name), name)
+        per_hour = self._messages_per_hour(name)
+        return f"{label} ({name})" + (f"  ·  ~{per_hour} × 10 s an hour" if per_hour else "")
+
+    def _messages_per_hour(self, name: str) -> int:
+        """Ten-second messages the hour's airtime holds at this quality."""
+        if self.link is None or name not in MODE_BY_NAME:
+            return 0
+        try:
+            codec = Codec2(MODE_BY_NAME[name])
+        except Codec2Unavailable:
+            return 0
+        size = codec.bytes_for_seconds(10.0)
+        codec.close()
+        _fragments, on_air = self.link.plan(protocol.BROADCAST, size)
+        seconds = self.link.budget.estimate_message(on_air)
+        limit = self.link.budget.limit_seconds
+        return int(limit // seconds) if seconds and limit != float("inf") else 0
+
+    def _edit_voice(self):
+        choices = [(f"{label} ({name})", name) for label, name in VOICE_QUALITIES]
+        current = self.settings.audio.codec_mode
+        index = next((i for i, (_l, n) in enumerate(choices) if n == current), 0)
+        self._begin_edit(ChoiceEditor(choices, index), "VOICE",
+                         "clearer takes more airtime per message")
+
+    def _edit_base(self):
+        choices = [(e.name, e.address) for e in self.roster.entries()]
+        choices.append(("(none)", None))
+        current = self.overrides.base_address
+        index = next((i for i, (_n, a) in enumerate(choices) if a == current), 0)
+        self._begin_edit(ChoiceEditor(choices, index), "BASE STATION")
+
+    def _edit_clock(self):
+        self._begin_edit(ClockEditor(clock.now()), "DATE & TIME")
+
+    def _edit_reset(self):
+        self._begin_edit(
+            ConfirmEditor("Erase everything?",
+                          "messages, voice clips, paired\nradios, keys and settings"),
+            "RESET",
+        )
+
+    def _editor_action(self, action):
+        editor = self.state.editor
+        if not editor.handle(action.name, action.char, keyboard=action.source == KEYBOARD):
+            return
+        title = self.state.editor_title
+        self.state.editor = None
+        self.state.screen = self._return_screen
+        if editor.cancelled:
+            if title == "PAIRING":
+                self._apply_pair_decision(False)
+            else:
+                self.state.flash("cancelled")
+        else:
+            self._commit_edit(title, editor)
+        self._refresh_settings()
+
+    def _commit_edit(self, title: str, editor):
+        if title == "DEVICE ID":
+            self._apply_device_id(editor.value)
+        elif title == "NAME":
+            self._apply_name(editor.value)
+        elif title == "CHANNEL":
+            self._apply_channel(editor.value)
+        elif title == "VOICE":
+            self._apply_voice(editor.value)
+        elif title == "BASE STATION":
+            self.overrides.set_base(editor.value)
+            self.state.flash(f"base: {editor.text}")
+        elif title == "DATE & TIME":
+            how = clock.apply(editor.to_datetime(), self.overrides)
+            self.state.flash("clock set" if how == "system" else "clock set (app only)")
+        elif title == "RESET":
+            self._apply_reset()
+        elif title == "PAIRING":
+            self._apply_pair_decision(True)
+
+    def _apply_device_id(self, address: int):
+        if address == self.settings.radio.address:
+            return
+        if any(c.address == address for c in self.settings.contacts):
+            self.state.flash("that is a contact's ID", 4.0)
+            self.player.cue(self.cues.error)
+            return
+        old = self.settings.radio.address
+        self.overrides.set("radio", "address", address)
+        self._set_address(address)
+        # Effective at once: addressing is in the packet header, not the
+        # module's registers. But radios that paired with the old ID still
+        # have it saved, and will be calling a number nobody answers.
+        self.state.flash(f"ID {address} · re-pair others", 5.0)
+        log.info("device id changed %d -> %d; radios paired with %d must pair again",
+                 old, address, old)
+
+    def _set_address(self, address: int):
+        """Use a new Device ID from now on. The caller persists it."""
+        self.settings.radio.address = address
+        self.state.address = address
+        if self.shared_radio:
+            shared_radio.save_identity(address, self.settings.identity.callsign)
+        if self.link is not None:
+            self.link.set_address(address)
+        # Cues are pitched by address, so this radio's sound moves with it.
+        self.cues = cues_for(address, self.settings.identity.callsign)
+
+    def _apply_name(self, name: str):
+        if name == self.settings.identity.callsign:
+            return
+        self.overrides.set("identity", "callsign", name)
+        self.settings.identity.callsign = name
+        self.state.callsign = name
+        if self.shared_radio:
+            shared_radio.save_identity(self.settings.radio.address, name)
+        if self.link is not None:
+            self.link.callsign = name
+        self.cues = cues_for(self.settings.radio.address, name)
+        # A hello carries the name, so calling everyone tells them now.
+        self._call_known_contacts(force=True)
+        self.state.flash(f"name: {name}")
+
+    def _apply_channel(self, channel: int):
+        if channel == self.settings.radio.privacy_channel:
+            return
+        self.overrides.set("radio", "privacy_channel", channel)
+        self.settings.radio.privacy_channel = channel
+        self.state.channel = channel
+        if self.link is not None:
+            self.link.set_channel(channel)
+        self._refresh_menus()
+        self.state.flash(f"channel {channel}", 3.0)
+
+    def _apply_voice(self, name: str):
+        if name == self.settings.audio.codec_mode or name not in MODE_BY_NAME:
+            return
+        try:
+            codec = Codec2(MODE_BY_NAME[name])
+        except Codec2Unavailable as exc:
+            log.error("cannot switch to codec2 %s: %s", name, exc)
+            self.state.flash("that quality is unavailable", 3.0)
+            return
+        old, self.codec = self.codec, codec
+        self.codec_mode = codec.mode
+        if old is not None:
+            old.close()
+        self.overrides.set("audio", "codec_mode", name)
+        self.settings.audio.codec_mode = name
+        self.state.codec_name = name
+        # Receivers decode each message in the mode it names, so nothing
+        # else has to change, here or on any other radio.
+        self.state.flash(f"voice: {self._voice_summary(name).split('  ·')[0]}", 3.0)
+
+    def _merge_shared_contacts(self):
+        """Radios paired in another radio app (the Messenger) become contacts,
+        and the names of radios paired here are shared with it."""
+        if not self.shared_radio or self.keyring is None:
+            return
+        names = shared_radio.shared_contacts()
+        known = {c.address for c in self.settings.contacts}
+        for contact in self.settings.contacts:
+            if contact.address in self.keyring.paired and contact.address not in names:
+                shared_radio.remember_contact(contact.address, contact.name)
+        for address in self.keyring.paired:
+            if address not in known and address != self.settings.radio.address:
+                name = names.get(address) or f"node {address}"
+                if self.overrides.add_contact(name, address):
+                    self.settings.contacts.append(Contact(name=name, address=address))
+                    log.info("contact %s (%d) paired in another radio app", name, address)
+
+    def _add_contact(self, name: str, address: int) -> bool:
+        """Save a station as a contact. False if it already was one."""
+        shared_radio.remember_contact(address, name)
+        if not self.overrides.add_contact(name, address):
+            self._rename_contact(address, name)
+            return False
+        self.settings.contacts.append(Contact(name=name, address=address))
+        self.roster = Roster(self.settings.contacts, self.settings.data_dir)
+        self._refresh_entries()
+        return True
+
+    def _rename_contact(self, address: int, name: str):
+        """A paired radio announced a new name; show it under that."""
+        if not name or not self.overrides.rename_contact(address, name):
+            return
+        shared_radio.remember_contact(address, name)
+        for contact in self.settings.contacts:
+            if contact.address == address:
+                contact.name = name
+        self.roster = Roster(self.settings.contacts, self.settings.data_dir)
+        self._refresh_entries()
+
+    # --- pairing ------------------------------------------------------------
+    # Both operators open Home > Pair devices. Each radio beacons its
+    # public key while the screen is open and lists the other radios it
+    # hears beaconing. Picking one sends it a pairing request -- our
+    # public key, and our broadcast key sealed so only it can read it --
+    # and both screens show a four-digit code from the two keys. The
+    # other operator checks the codes match and accepts, which answers
+    # with the same in the other direction. Only then does either side
+    # save the other: the one that asked saves when the answer arrives.
+    def _start_pairing(self):
+        if self.link is None:
+            self.state.flash(self.radio_offline)
+            self.player.cue(self.cues.error)
+            return
+        self._pairing = True
+        self._pairing_until = time.monotonic() + PAIR_WINDOW_SECONDS
+        self._pair_beacon_due = 0.0           # announce straight away
+        self._pair_found = {}
+        self._pairing_with = None
+        self.state.pair_index = 0
+        self.state.pair_back = True
+        self.state.pair_status = "looking for radios"
+        self._refresh_pair_view()
+        self._show(PAIR)
+        log.info("pairing: announcing as %s (ID %d) on channel %d",
+                 self.settings.identity.callsign, self.settings.radio.address,
+                 self.settings.radio.privacy_channel)
+
+    def _stop_pairing(self, then: str | None = None):
+        """End pairing; if the pairing screen is up, move to `then`."""
+        self._pairing = False
+        self._pairing_with = None
+        if then is None:
+            return
+        if self.state.screen == PAIR:
+            self.state.screen = then
+        elif self.state.screen == EDIT and self._return_screen == PAIR:
+            self._return_screen = then
+
+    def _finish_pairing(self, addr: int, name: str):
+        # Land on the paired list, with Back leading out through Start to
+        # Home -- not back into a pairing screen that has closed.
+        self._stop_pairing(CONTACTS)
+        self._parents[CONTACTS] = START
+        self._parents[START] = HOME
+        self.roster.select_address(addr)
+        self.state.contacts_back = False
+        self._refresh_entries()
+        self._refresh_menus()
+        self.state.flash(f"paired with {name}", 4.0)
+        log.info("pairing: paired with %s (%d)", name, addr)
+        # Start watching it now rather than at the next regular check.
+        self._check_due = min(self._check_due, time.monotonic() + 3.0)
+
+    def _refresh_pair_view(self):
+        # Discovery order, not signal or recency: re-sorting on every
+        # beacon would move the row under the operator's cursor.
+        paired = self.keyring.is_paired if self.keyring else (lambda _a: False)
+        self.state.pair_found = [
+            (addr, info["name"], info["rssi"], paired(addr))
+            for addr, info in (self._pair_found or {}).items()
+        ]
+        self.state.pair_channels = {addr: info.get("channel")
+                                    for addr, info in (self._pair_found or {}).items()}
+
+    def _next_found(self, step: int = 1):
+        count = len(self.state.pair_found)
+        index = count if self.state.pair_back else self.state.pair_index
+        index = (index + step) % (count + 1)
+        self.state.pair_back = index == count
+        if not self.state.pair_back:
+            self.state.pair_index = index
+
+    def _pair_selected(self):
+        found = self.state.pair_found
+        if not found or self.link is None:
+            self.state.flash("none found yet")
+            return
+        addr, name, _rssi, _known = found[self.state.pair_index % len(found)]
+        public = self._pair_found[addr]["public"]
+        code = self.keyring.code_with(public)
+        self._pairing_with = (addr, name, time.monotonic(), public)
+        self.state.pair_status = f"code {code} · waiting for {name}"
+        log.info("pairing: asking %s (%d), code %s", name, addr, code)
+        body = self.keyring.pair_body(public, self.settings.radio.address, addr,
+                                      self.settings.identity.callsign)
+        self.link.send_pairing(protocol.PAIR_REQUEST, addr, body)
+
+    def _on_pair_beacon(self, message, peer):
+        """Someone nearby is pairing. On the rx thread."""
+        if not self._pairing:
+            return  # nobody here asked to see it
+        _token, public, name = protocol.parse_pair(message.body)
+        name = name or peer.name or f"node {message.src}"
+        fresh = message.src not in self._pair_found
+        self._pair_found[message.src] = {"name": name, "rssi": message.rssi_dbm,
+                                         "public": public, "channel": message.channel}
+        self._refresh_pair_view()
+        if fresh:
+            log.info("pairing: found %s (%d)", name, message.src)
+            # Answer now rather than on the next beacon, so the other
+            # radio lists us as soon as we listed it.
+            self._pair_beacon_due = 0.0
+        self._wake.set()
+
+    def _on_pair_request(self, message):
+        """Another radio asks to pair. On the rx thread.
+
+        Only while pairing: a request that arrives otherwise is ignored,
+        so nobody can make a radio in someone's pocket start asking.
+        """
+        if not self._pairing or self._pending_pair is not None:
+            return
+        opened = self.keyring.open_pair_body(message.body, message.src,
+                                             self.settings.radio.address)
+        if opened is None:
+            log.warning("pairing: an unreadable request from %d", message.src)
+            return
+        public, broadcast, name = opened
+        name = name or f"node {message.src}"
+        code = self.keyring.code_with(public)
+        self._pending_pair = (message.src, name, public, broadcast, code)
+        log.info("pairing: %s (%d) asks to pair, code %s", name, message.src, code)
+        self._wake.set()
+
+    def _prompt_pending_pair(self):
+        """Show the accept/refuse prompt, once there is a moment to."""
+        if not self._pending_pair or self.state.screen == EDIT:
+            return
+        if self.state.busy or not self.foregrounded:
+            return
+        addr, name, _public, _broadcast, code = self._pending_pair
+        self._begin_edit(
+            ConfirmEditor(f"{name} wants to pair",
+                          f"code {code}  ·  ID {addr}\nsame code on both screens?\n"
+                          "accept to add it as a contact"),
+            "PAIRING",
+        )
+
+    def _apply_pair_decision(self, accepted: bool):
+        pending, self._pending_pair = self._pending_pair, None
+        if pending is None or self.link is None:
+            return
+        addr, name, public, broadcast, _code = pending
+        if not accepted:
+            self.link.refuse(addr)
+            self.state.flash(f"{name} refused")
+            return
+        self.keyring.add_peer(addr, public, broadcast)
+        body = self.keyring.pair_body(public, self.settings.radio.address, addr,
+                                      self.settings.identity.callsign)
+        self.link.send_pairing(protocol.PAIR_ACCEPT, addr, body)
+        self.link.mark_linked(addr)
+        self._add_contact(name, addr)
+        self._finish_pairing(addr, name)
+
+    def _on_pair_accept(self, message):
+        """The radio we asked said yes. On the rx thread."""
+        if not self._pairing or not self._pairing_with \
+                or self._pairing_with[0] != message.src:
+            return
+        addr, name, _asked, expected = self._pairing_with
+        opened = self.keyring.open_pair_body(message.body, message.src,
+                                             self.settings.radio.address)
+        if opened is None or opened[0] != expected:
+            # Not the key its beacon offered: someone else answered for it.
+            self._pairing_with = None
+            self.state.pair_status = f"{name}: keys did not match, not paired"
+            log.warning("pairing: %s (%d) answered with a different key", name, addr)
+            return
+        _public, broadcast, announced = opened
+        self._pairing_with = None
+        self.keyring.add_peer(addr, expected, broadcast)
+        self.link.mark_linked(addr)
+        self._add_contact(announced or name, addr)
+        self._finish_pairing(addr, announced or name)
+        # Pairing is heard across privacy channels, talking is not: the
+        # radio that asked joins the channel of the one that said yes, or
+        # the two would be paired and still unable to hear each other.
+        if message.channel != self.settings.radio.privacy_channel:
+            self._apply_channel(message.channel)
+            self.state.flash(f"paired with {announced or name} · now on channel "
+                             f"{message.channel}", 5.0)
+
+    def _on_pair_refused(self, message):
+        if self._pairing_with and self._pairing_with[0] == message.src:
+            self.state.pair_status = f"{self._pairing_with[1]} said no"
+            self._pairing_with = None
+            self._wake.set()
+
+    def _on_clash(self, name: str):
+        """Another radio is beaconing with our Device ID. On the rx thread."""
+        if self._pairing:
+            # This is the radio being set up, so this is the one that moves.
+            old = self.settings.radio.address
+            taken = {c.address for c in self.settings.contacts} | {old}
+            if self.link is not None:
+                taken |= set(self.link.peers)
+            new = self.overrides.assign_address(taken)
+            self._set_address(new)
+            self._pair_beacon_due = 0.0       # announce the new ID at once
+            self.state.flash(f"ID {old} was taken: now {new}", 5.0)
+            log.warning("pairing: %s also uses ID %d; this radio is now %d",
+                        name or "another radio", old, new)
+        elif time.monotonic() - self._last_clash_reply >= CLASH_REPLY_SECONDS:
+            # Not the one being set up: answer, so the radio that is
+            # pairing hears the clash and moves itself.
+            self._last_clash_reply = time.monotonic()
+            if self.link is not None:
+                self.link.send_pair()
+        self._wake.set()
+
+    def _pairing_tick(self):
+        """Beacon, and time out, while pairing. Called from the main loop."""
+        now = time.monotonic()
+        if now >= self._pairing_until:
+            log.info("pairing: window closed")
+            self._stop_pairing((self._parents or {}).get(PAIR, HOME))
+            self.state.flash("pairing timed out", 3.0)
+            return
+        if self._pairing_with and now - self._pairing_with[2] >= PAIR_ANSWER_SECONDS:
+            self.state.pair_status = f"no answer from {self._pairing_with[1]}"
+            self._pairing_with = None
+        if now >= self._pair_beacon_due and self.link is not None:
+            self.link.send_pair()
+            self._pair_beacon_due = now + PAIR_BEACON_SECONDS
+
+    def _pairing_deadline(self) -> float:
+        deadlines = [self._pair_beacon_due, self._pairing_until]
+        if self._pairing_with:
+            deadlines.append(self._pairing_with[2] + PAIR_ANSWER_SECONDS)
+        return max(0.05, min(deadlines) - time.monotonic())
+
+    def _apply_reset(self):
+        log.warning("resetting all app data at the operator's request")
+        self._stop_range_test()
+        if self.monitor is not None:
+            self.monitor = LinkMonitor(self.settings.radio.link_check_seconds)
+        for item in list(self.inbox.items):
+            if item.voice_file:
+                (self.inbox.voice_dir / item.voice_file).unlink(missing_ok=True)
+        self.inbox.items = []
+        self.inbox.save()
+        self.overrides.clear()
+        # New keys: every radio this one paired with has to pair again,
+        # and nothing recorded off the air before can be opened with them.
+        if self.keyring is not None:
+            # The keys are shared: this unpairs every radio in every radio app.
+            self.keyring.reset()
+            for address in shared_radio.shared_contacts():
+                shared_radio.forget_contact(address)
+        self.settings.contacts = []
+        self.roster = Roster(self.settings.contacts, self.settings.data_dir)
+        self._target = (protocol.BROADCAST, BROADCAST_NAME)
+        clock.set_offset(0.0)
+        try:
+            self.roster._seen = {}
+            self.roster.save()
+        except Exception:
+            log.debug("roster reset failed", exc_info=True)
+        self.state.inbox = self.inbox.items
+        self.state.unread = 0
+        self.state.inbox_index = 0
+        self._refresh_entries()
+        self._refresh_menus()
+        self.state.flash("all data erased", 4.0)
+
+    # --- is each paired radio in range? ---------------------------------------
+    # Every radio pings all of its paired radios at once every couple of
+    # minutes (config.yaml: radio.link_check_seconds). See linkcheck for
+    # what the pings carry and how the states are worked out.
+    def _send_ping(self, dst: int, reply: bool) -> int | None:
+        if self.link is None:
+            return None
+        self._ping_seq = (self._ping_seq + 1) % 256
+        watched = self.monitor.peers if self.monitor is not None else {}
+        reports = {addr: link.down for addr, link in list(watched.items())
+                   if link.down is not None and dst in (addr, protocol.BROADCAST)}
+        recent = self._recent_sent() if dst == protocol.BROADCAST else []
+        body = protocol.ping_body(self._ping_seq, int(self.settings.radio.link_check_seconds),
+                                  reply, reports, recent)
+        try:
+            self.link.send_ping(dst, body)
+        except NotPaired:
+            return None
+        if reply and self.monitor is not None:
+            self.monitor.probe_sent(dst, self._ping_seq, time.monotonic())
+        return self._ping_seq
+
+    def _airtime_for_checks(self) -> bool:
+        """Is there airtime to spare for a check, leaving the rest for voice?"""
+        budget = self.link.budget
+        if budget.unlimited:
+            return True
+        return budget.remaining_seconds() >= CHECK_RESERVE * budget.limit_seconds
+
+    def _link_check_tick(self):
+        """The regular check. Called from the main loop."""
+        interval = self.settings.radio.link_check_seconds
+        now = time.monotonic()
+        if self.link is None or not interval or now < self._check_due:
+            return
+        self._check_due = now + interval
+        if self.range_test is not None or not self._paired_addresses():
+            return        # the range test's probes do this job while it runs
+        if self._radio_is_busy() or self.state.radio_state == RECORDING:
+            self._check_due = now + 10.0      # not over a message; soon, though
+            return
+        if not self._airtime_for_checks():
+            log.info("link check skipped: keeping the hour's airtime for voice")
+            return
+        self._send_ping(protocol.BROADCAST, reply=False)
+
+    def _probe(self, addr: int) -> int | None:
+        """Ask one radio to answer now: settles "is it there?" in a second."""
+        if self.link is None or not self.link.can_send(addr, protocol.PING):
+            return None
+        return self._send_ping(addr, reply=True)
+
+    def _check_before_talking(self, addr: int):
+        """Opening Talk on a radio not heard lately probes it first."""
+        if addr == protocol.BROADCAST or self.monitor is None or self.link is None:
+            return
+        link = self.monitor.peers.get(addr)
+        fresh = (link is not None and link.last_heard is not None
+                 and time.monotonic() - link.last_heard < FRESH_SECONDS)
+        if not fresh and self._airtime_for_checks():
+            self._probe(addr)
+
+    def _recent_sent(self) -> list:
+        """What our pings list: voice sent lately, with a fingerprint each."""
+        recent = []
+        for item in self.inbox.sent_since(time.time() - RECENT_SECONDS,
+                                          protocol.MAX_RECENT):
+            data = self.inbox.voice_bytes(item)
+            if data:
+                recent.append(protocol.Recent(
+                    item.msg_id, item.total,
+                    protocol.chunk_check(data, 0, item.fragment_size), item.dst))
+        return recent
+
+    def _on_ping(self, message):
+        ping = protocol.parse_ping(message.body)
+        if ping is None or self.monitor is None:
+            return
+        self.monitor.ping(message.src, ping, message.rssi_dbm,
+                          self.settings.radio.address, time.monotonic())
+        self._catch_up(message.src, ping.recent)
+
+    def _on_pong(self, message):
+        pong = protocol.parse_pong(message.body)
+        if pong is None or self.monitor is None:
+            return
+        seq, at_them, heard = pong
+        now = time.monotonic()
+        self.monitor.pong(message.src, seq, at_them, message.rssi_dbm, now)
+        test = self.range_test
+        if test is not None and message.src == test.peer:
+            test.answer(seq, message.rssi_dbm, at_them, heard, now)
+            self._refresh_range_view()
+
+    def _update_link_status(self):
+        """Fold the link check into the view; say so when a radio comes or goes."""
+        if self.monitor is None:
+            return
+        now = time.monotonic()
+        for addr, old, new in self.monitor.update(now):
+            name = self._name_of(addr)
+            log.info("link check: %s (%d) %s -> %s", name, addr, old, new)
+            if new == DISCONNECTED and old in (IN_RANGE, WEAK):
+                self.state.flash(f"{name} disconnected", 4.0)
+                if self.settings.audio.cues:
+                    self.player.cue(self.cues.error)
+            elif new in (IN_RANGE, WEAK) and old == DISCONNECTED:
+                self.state.flash(f"{name} back in range", 3.0)
+                if self.settings.audio.cues:
+                    self.player.cue(self.cues.tx_done)
+        unreadable = self.link.unreadable if self.link is not None else {}
+        status = {}
+        for addr in list(self.monitor.peers):
+            if addr in unreadable:
+                # Its packets arrive and fail to open: it was reset, or
+                # paired again elsewhere. Only pairing again fixes it.
+                status[addr] = ("keys changed", "keys changed: pair again")
+            else:
+                status[addr] = (self.monitor.state_of(addr, now),
+                                self.monitor.summary(addr, now))
+        self.state.link_status = status
+
+    # --- asking for a message again ----------------------------------------------
+    def _fetch_state(self):
+        if self._retrieving is None:
+            self._retrieving, self._fetch_tries, self._play_when_fetched = {}, {}, set()
+
+    def _retrieve(self, item, play_when_done: bool = False, quiet: bool = False) -> bool:
+        """Ask the sender for the fragments of `item` that never arrived."""
+        self._fetch_state()
+        if self.link is None or not item.can_retrieve:
+            return False
+        name = item.peer_name or f"node {item.src}"
+        if not self.link.can_send(item.src, protocol.RETRIEVE):
+            if not quiet:
+                self.state.flash(f"pair with {name} again to fetch it", 3.0)
+            return False
+        now = time.monotonic()
+        if self._retrieving.get(item.src, 0.0) > now:
+            if not quiet:
+                self.state.flash(f"already asking {name}")
+            return False
+        check_seq, check = self.inbox.held_check(item)
+        seconds = self.link.retrieve(
+            item.src, item.msg_id, item.total, wanted=item.missing,
+            check_seq=check_seq, check=check, flags=item.codec_mode,
+            fragment_size=item.fragment_size)
+        self._retrieving[item.src] = now + seconds + 2.0
+        item.retrieving = True
+        item.retrieve_tries += 1
+        self.inbox.save()
+        if play_when_done:
+            self._play_when_fetched.add(item.id)
+        if not quiet:
+            self.state.flash(f"asking {name} for the missing part", 3.0)
+        self._wake.set()
+        return True
+
+    def _catch_up(self, src: int, recent: list):
+        """A paired radio listed its recent messages: fetch what we lack.
+
+        One missed completely -- we were out of range when it went -- is
+        asked for whole; one that came with gaps, for the gaps. One at a
+        time per radio, and each only a couple of times, so a radio that
+        cannot answer is not asked forever.
+        """
+        self._fetch_state()
+        if self.link is None or self._retrieving.get(src, 0.0) > time.monotonic():
+            return
+        if not self.link.can_send(src, protocol.RETRIEVE):
+            return
+        me = self.settings.radio.address
+        for entry in recent:
+            if entry.dst not in (me, protocol.BROADCAST):
+                continue
+            item = self.inbox.find(src, entry.msg_id, entry.total)
+            if item is None:
+                key = (src, entry.msg_id, entry.total)
+                tries = self._fetch_tries.get(key, 0)
+                if tries >= MAX_FETCHES:
+                    continue
+                self._fetch_tries[key] = tries + 1
+                log.info("%d sent message %d while we were not listening; asking for it",
+                         src, entry.msg_id)
+                seconds = self.link.retrieve(src, entry.msg_id, entry.total, check_seq=0,
+                                             check=entry.check)
+                self._retrieving[src] = time.monotonic() + seconds + 2.0
+                return
+            if item.can_retrieve and not item.retrieving \
+                    and item.retrieve_tries < MAX_FETCHES:
+                if self._retrieve(item, quiet=True):
+                    return
+
+    def _on_resent(self, message, peer):
+        """Fragments came again, asked for by us. On a link thread."""
+        self._fetch_state()
+        self._retrieving.pop(message.src, None)
+        name = peer.name or self._name_of(message.src)
+        item = self.inbox.find(message.src, message.msg_id, message.total)
+        nothing = len(message.missing) >= message.total
+        if item is None:
+            if nothing:
+                log.info("no answer from %d about message %d", message.src, message.msg_id)
+                return
+            # A message that went while we were out of range.
+            message = self._silence_gaps(dataclasses.replace(message, type=protocol.VOICE))
+            duration = self._voice_duration(message)
+            item = self.inbox.add_voice(message, name, duration)
+            self.state.flash(f"missed voice from {name} · {duration:.0f}s", 4.0)
+            if self.range_test is not None:
+                self.range_test.note("voice_fetched", f"{duration:.1f}s from {name}, "
+                                     f"missed while out of range")
+            self._after_inbox_change()
+            self._autoplay(item)
+            return
+
+        item.retrieving = False
+        wanted_play = item.id in self._play_when_fetched
+        self._play_when_fetched.discard(item.id)
+        arrived = self.inbox.merge(item, message)
+        if not arrived:
+            self.inbox.save()
+            if wanted_play:
+                self.state.flash(f"no answer from {name}" if nothing
+                                 else f"{name} sent nothing new", 3.0)
+            self._after_inbox_change()
+            return
+        item.duration = self._voice_duration(
+            dataclasses.replace(message, body=self.inbox.voice_bytes(item),
+                                flags=item.codec_mode))
+        self.inbox.save()
+        whole = not item.missing
+        log.info("message %d from %d: %d fragment(s) came again, %d still missing",
+                 message.msg_id, message.src, len(arrived), len(item.missing))
+        if self.range_test is not None:
+            self.range_test.note("voice_fetched", f"{len(arrived)} fragment(s) from "
+                                 f"{name}, {len(item.missing)} still missing")
+        self.state.flash(f"voice from {name}: " + ("complete now" if whole
+                         else f"{len(arrived)} more part(s)"), 3.0)
+        if wanted_play:
+            self._autoplay(item)
+        else:
+            item.played = False           # worth hearing again: shown as new
+        self._after_inbox_change()
+
+    def _after_inbox_change(self):
+        self.state.inbox = self.inbox.items
+        self.state.unread = self.inbox.unread
+        self._wake.set()
+
+    def _on_retrieve(self, src: int, request):
+        """Another radio asks for one of our messages again. On the rx thread."""
+        item = self.inbox.find(None, request.msg_id, request.total, outgoing=True)
+        if item is None or item.dst not in (src, protocol.BROADCAST):
+            return None
+        data = self.inbox.voice_bytes(item)
+        if not data:
+            return None
+        if request.check_seq != protocol.NO_CHECK and (
+                request.check_seq >= item.total
+                or protocol.chunk_check(data, request.check_seq, item.fragment_size)
+                != request.check):
+            log.info("%d asked for message %d, but not the one we kept under that "
+                     "number", src, request.msg_id)
+            return None
+        self.state.flash(f"sending {self._name_of(src)} what it missed", 3.0)
+        self._wake.set()
+        return data, item.codec_mode
+
+    # --- range test ------------------------------------------------------------
+    def _range_peer(self):
+        """The radio under test: the one being talked to, else the first paired."""
+        paired = self._paired_addresses()
+        addr, _name = self._target
+        if addr in paired:
+            return addr, self._name_of(addr)
+        return (paired[0], self._name_of(paired[0])) if paired else None
+
+    def _start_range_test(self):
+        if self.link is None:
+            self.state.flash(self.radio_offline)
+            self.player.cue(self.cues.error)
+            return
+        self._stop_range_test()
+        peer = self._range_peer()
+        self._show(RANGE)
+        if peer is None:
+            self.state.range_view = {}
+            return
+        addr, name = peer
+        self._target = (addr, name)
+        self._refresh_entries()
+        self.range_test = RangeTest(addr, name, self.settings.data_dir,
+                                    self.settings.radio.range_test_seconds,
+                                    self.settings.radio.air_speed)
+        self._refresh_range_view()
+        log.info("range test with %s (%d) started", name, addr)
+
+    def _stop_range_test(self):
+        test, self.range_test = self.range_test, None
+        if test is None:
+            return
+        test.close()
+        log.info("range test stopped: %d of %d probes answered; log %s",
+                 test.answered, test.sent, test.path)
+        if test.path is not None:
+            self.state.flash(f"saved {test.path.name}", 4.0)
+
+    def _range_tick(self):
+        """Probe when due, and log the probes that went unanswered."""
+        test = self.range_test
+        if test is None or self.link is None:
+            return
+        now = time.monotonic()
+        test.duty_used = self.link.budget.fraction_used()
+        test.expire(now)
+        if test.due(now):
+            if self._radio_is_busy() or self.state.radio_state == RECORDING:
+                test.next_due = now + 2.0         # after this message
+            elif not self._probe_fits():
+                test.probe_skipped("duty cycle", now)
+            else:
+                seq = self._probe(test.peer)
+                if seq is None:
+                    test.probe_skipped("not paired", now)
+                else:
+                    test.probe_sent(seq, now)
+        self._refresh_range_view()
+
+    def _probe_fits(self) -> bool:
+        budget = self.link.budget
+        if budget.unlimited:
+            return True
+        cost = self.link.packet_seconds(protocol.PING, self.range_test.peer, 16)
+        return budget.remaining_seconds() >= cost
+
+    def _refresh_range_view(self):
+        test = self.range_test
+        if test is None:
+            return
+        air = self.settings.radio.air_speed
+        self.state.range_view = {
+            "name": test.name, "interval": test.interval,
+            "air": f"{air / 1000:g}k", "success": test.success,
+            "window": (sum(test.recent), len(test.recent)),
+            "down": test.down, "up": test.up, "sent": test.sent,
+            "answered": test.answered, "marks": test.marks,
+            "elapsed": test.elapsed(), "last_result": test.last_result,
+            "log": test.path.name if test.path else "",
+        }
+
+    def _mark_spot(self):
+        if self.range_test is None:
+            return
+        number = self.range_test.mark()
+        self.state.flash(f"mark {number}", 2.0)
+        if self.settings.audio.cues:
+            self.player.cue(self.cues.tx_done)
+        self._refresh_range_view()
+
+    def _probe_now(self):
+        if self.range_test is not None:
+            self.range_test.next_due = time.monotonic()
+            self._wake.set()
+
+    # --- push to talk ---------------------------------------------------
+    def _on_talk_start(self):
+        """The button has been down long enough to mean speech."""
+        self.display.poke()
+        if self.state.radio_state in (RECORDING, SENDING):
+            return
+        if self.state.screen == EDIT:
+            # A hold here is not an attempt to talk; it would transmit
+            # whatever half-edited value is on screen.
+            self.state.flash("finish editing first")
+            self._wake.set()
+            return
+        if not self._can_talk():
+            self.state.flash("listening only here" if self.state.screen == INBOX
+                             else "to talk: Home > Start")
+            self._wake.set()
+            return
+        if self.link is None:
+            self.state.flash(self.radio_offline)
+            self._wake.set()
+            return
+        if not self.recorder.available or self.codec is None:
+            self.state.flash(self.state.audio_note or "no microphone", 3.0)
+            self.player.cue(self.cues.error)
+            self._wake.set()
+            return
+        addr, name = self._target
+        if not self._can_reach(addr, name):
+            self._wake.set()
+            return
+
+        self.player.stop()  # duck any playback so we do not record it
+        if not self.recorder.start():
+            self.state.flash("microphone busy")
+            self._wake.set()
+            return
+
+        if self.state.screen != RANGE:
+            # The range test shows its own progress, and leaving it would
+            # end the test.
+            self._show(TALK)
+        self.state.radio_state = RECORDING
+        self.display.set_led(theme.LED_REC)
+        self._wake.set()
+
+    def _on_talk_end(self, held_seconds: float):
+        if self.state.radio_state != RECORDING:
+            return
+        pcm = self.recorder.stop()
+        self.state.radio_state = IDLE
+        self.display.set_led(theme.LED_IDLE)
+        if getattr(self.recorder, "last_clipped", 0.0) > CLIPPED_TOO_MUCH:
+            # Distorted at the microphone: no codec can make that clear.
+            self.state.flash("mic too loud: hold the radio further away", 4.0)
+
+        duration = len(pcm) / 2 / SAMPLE_RATE
+        if duration < MIN_TALK_SECONDS or not pcm:
+            self.state.flash("too short")
+            self.player.cue(self.cues.error)
+            self._wake.set()
+            return
+
+        # Encoding is off the UI thread: 20 s of 700C is real work on a
+        # Zero 2 W, and the screen should stay live while it happens.
+        threading.Thread(
+            target=self._encode_and_send, args=(pcm, duration),
+            name="encode-send", daemon=True,
+        ).start()
+        self._wake.set()
+
+    def _encode_and_send(self, pcm: bytes, duration: float):
+        address, name = self._target
+        started = time.monotonic()
+        try:
+            encoded = self.codec.encode(pcm)
+        except Exception:
+            log.exception("codec2 encode failed")
+            self.state.flash("encode failed")
+            self.player.cue(self.cues.error)
+            self._wake.set()
+            return
+
+        try:
+            packets, on_air = self.link.plan(address, len(encoded))
+        except NotPaired:
+            self.state.flash(f"pair with {name} first", 3.0)
+            self.player.cue(self.cues.error)
+            self._wake.set()
+            return
+        log.info(
+            "%.1fs speech -> %d B in %.0f ms -> %d packet(s) to %s",
+            duration, len(encoded), (time.monotonic() - started) * 1000,
+            packets, name,
+        )
+
+        airtime = self.link.budget.estimate_message(on_air)
+        if self.link.budget.remaining_seconds() < airtime:
+            self.state.flash("duty cycle full", 4.0)
+            self.player.cue(self.cues.error)
+            self._wake.set()
+            return
+
+        self.state.radio_state = SENDING
+        self.state.tx_sent, self.state.tx_total = 0, packets
+        if self.settings.audio.cues:
+            self.player.cue(self.cues.tx_start)
+        self.display.set_led(theme.LED_TX)
+        self._wake.set()
+
+        msg_id = self.link.send_voice(address, encoded, self.codec_mode)
+        self._record_outgoing(name, duration, encoded, msg_id, packets, address)
+        if self.range_test is not None:
+            self.range_test.note("voice_tx", f"{duration:.1f}s to {name}, "
+                                 f"{packets} fragment(s)")
+
+    def _record_outgoing(self, target_name: str, duration: float, encoded: bytes,
+                         msg_id: int, total: int, dst: int):
+        """Keep what was sent: it is what a request for it again is answered from."""
+        sent = protocol.Message(
+            type=protocol.VOICE, src=self.settings.radio.address, msg_id=msg_id,
+            body=encoded, flags=self.codec_mode, missing=[], rssi_dbm=None,
+            received_at=time.time(), dst=dst, total=total,
+            fragment_size=protocol.VOICE_CHUNK,
+        )
+        self.inbox.add_voice(sent, target_name, duration, outgoing=True)
+        self.state.inbox = self.inbox.items
+
+    # --- receiving ------------------------------------------------------
+    def _on_radio_message(self, message, peer):
+        """Called on the link's rx thread; must not block it for long."""
+        # Pairing traffic comes before the roster: a stranger pairing across
+        # the street is not someone to list among your stations.
+        pairing = {protocol.PAIR: lambda: self._on_pair_beacon(message, peer),
+                   protocol.PAIR_REQUEST: lambda: self._on_pair_request(message),
+                   protocol.PAIR_ACCEPT: lambda: self._on_pair_accept(message),
+                   protocol.REJECT: lambda: self._on_pair_refused(message)}
+        if message.type in pairing:
+            pairing[message.type]()
+            return
+        heard = not (message.type == protocol.RESENT
+                     and len(message.missing) >= message.total)
+        if heard:
+            self.roster.note_peer(message.src, peer.name, message.rssi_dbm)
+            if message.rssi_dbm is not None:
+                self.state.last_rssi = message.rssi_dbm
+            if self.monitor is not None:
+                self.monitor.heard(message.src, message.rssi_dbm, time.monotonic())
+
+        if message.type in (protocol.PING, protocol.PONG):
+            # Bookkeeping, every couple of minutes: it must not light the
+            # screen or write the card each time.
+            if message.type == protocol.PING:
+                self._on_ping(message)
+            else:
+                self._on_pong(message)
+            self._wake.set()
+            return
+        self.roster.save()
+        self.display.poke()
+
+        if message.type == protocol.RESENT:
+            self._on_resent(message, peer)
+            self._wake.set()
+            return
+
+        if message.type in (protocol.HELLO, protocol.HELLO_ACK):
+            # Sealed with our shared key, so the name in it is really theirs.
+            self._rename_contact(message.src, peer.name)
+            self._refresh_entries()
+            if message.type == protocol.HELLO:
+                self.state.flash(f"{peer.name or message.src} on air")
+            self._wake.set()
+            return
+
+        if message.type == protocol.ACK:
+            if self.chat is not None:
+                self.chat.on_ack(message)
+            self._wake.set()
+            return
+        name = peer.name or f"node {message.src}"
+        if message.type == protocol.TEXT:
+            item = self.inbox.add_text(message, name)
+            self.state.flash(f"{name}: {message.body.decode('utf-8', 'replace')[:24]}")
+            if self.chat is not None:
+                self.chat.on_text(message, item)
+        elif message.type == protocol.VOICE:
+            message = self._silence_gaps(message)
+            duration = self._voice_duration(message)
+            item = self.inbox.add_voice(message, name, duration)
+            self.state.flash(f"{name} · {duration:.0f}s voice"
+                             + (" · gaps" if message.missing else ""))
+            if self.range_test is not None:
+                self.range_test.note(
+                    "voice_rx", f"{duration:.1f}s from {name}, "
+                    f"{len(message.missing)} of {message.total} fragment(s) missing",
+                    rssi_down_dbm=message.rssi_dbm)
+            self._autoplay(item)
+        else:
+            return
+
+        self.state.inbox = self.inbox.items
+        self.state.unread = self.inbox.unread
+        self._refresh_entries()
+        self._wake.set()
+
+    def _silence_gaps(self, message):
+        """Fill each lost fragment's place with encoded silence.
+
+        The link keeps a lost fragment's place as zero bytes, so the
+        frames after it still line up; zeros are not silence to Codec2,
+        though, and play as a burst. Encoded silence plays as a pause the
+        length of what was lost, and the words either side stay clear.
+        """
+        if not message.missing or not message.fragment_size:
+            return message
+        mode = message.flags if message.flags in NAME_BY_MODE else self.codec_mode
+        try:
+            codec = self.codec if self.codec and mode == self.codec_mode else Codec2(mode)
+        except Codec2Unavailable:
+            return message
+        if codec is None:
+            return message
+        frame = codec.encode(bytes(codec.samples_per_frame * 2))
+        body = bytearray(message.body)
+        size = message.fragment_size
+        for seq in message.missing:
+            start = seq * size
+            frames = (min(start + size, len(body)) - start) // len(frame)
+            if frames > 0:
+                body[start:start + frames * len(frame)] = frame * frames
+        log.info("silenced %d lost fragment(s) of a voice message from %d",
+                 len(message.missing), message.src)
+        return dataclasses.replace(message, body=bytes(body))
+
+    def _voice_duration(self, message) -> float:
+        mode = message.flags if message.flags in NAME_BY_MODE else self.codec_mode
+        try:
+            codec = self.codec if mode == self.codec_mode else Codec2(mode)
+        except Codec2Unavailable:
+            return 0.0
+        if codec is None:
+            return 0.0
+        return codec.seconds_for_bytes(len(message.body))
+
+    def _autoplay(self, item):
+        """Walkie-talkie behaviour: incoming speech plays straight away.
+
+        Held back only while the operator is talking or transmitting --
+        playing then would both record our own speaker and confuse who
+        has the channel.
+        """
+        if self.state.radio_state in (RECORDING, SENDING):
+            log.info("holding playback: busy transmitting")
+            return
+        threading.Thread(target=self._play_item, args=(item,),
+                         name="autoplay", daemon=True).start()
+
+    def _play_selected(self):
+        if not self.inbox.items:
+            self.state.flash("inbox empty")
+            return
+        item = self.inbox.items[self.state.inbox_index % len(self.inbox.items)]
+        if item.kind != "voice" or not item.voice_file:
+            self.state.flash("nothing to play")
+            return
+        threading.Thread(target=self._play_item, args=(item, True),
+                         name="playback", daemon=True).start()
+
+    def _replay_last(self):
+        item = self.inbox.latest_voice()
+        if item is None:
+            self.state.flash("no voice yet")
+            return
+        threading.Thread(target=self._play_item, args=(item, True),
+                         name="replay", daemon=True).start()
+
+    def _play_item(self, item, fetch_gaps: bool = False):
+        """Play a kept message. `fetch_gaps`: the operator chose to hear it
+        again, so if parts of it never arrived, ask the sender for them --
+        and play it once more when they come."""
+        if fetch_gaps and item.can_retrieve and not item.retrieving:
+            self._retrieve(item, play_when_done=True)
+        if not self._playback_lock.acquire(timeout=10):
+            return
+        try:
+            data = self.inbox.voice_bytes(item)
+            if not data or self.codec is None or not self.player.available:
+                self.state.flash(self.state.audio_note or "no speaker")
+                self._wake.set()
+                return
+
+            mode = item.codec_mode if item.codec_mode in NAME_BY_MODE else self.codec_mode
+            codec = self.codec if mode == self.codec_mode else Codec2(mode)
+            pcm = codec.decode(data)
+            if item.incomplete:
+                # Fragments that never arrived become silence of the right
+                # length, so the clip keeps its timing instead of jumping.
+                pcm += codec.silence(0.3)
+
+            self.state.radio_state = PLAYING
+            self.display.set_led(theme.LED_RX)
+            self._wake.set()
+            if self.settings.audio.cues:
+                # The *sender's* pitch, so you know who is calling before
+                # a word is decoded.
+                self.player.play(cues_for(item.src).rx)
+            self.player.play(pcm)
+            self.inbox.mark_played(item)
+            self.state.unread = self.inbox.unread
+        except Exception:
+            log.exception("playback failed")
+        finally:
+            self.state.radio_state = IDLE
+            self.display.set_led(theme.LED_IDLE)
+            self._playback_lock.release()
+            self._wake.set()
+
+    def _on_tx_progress(self, sent: int, total: int):
+        self.state.tx_sent, self.state.tx_total = sent, total
+        if sent >= total:
+            self.state.radio_state = IDLE
+            self.display.set_led(theme.LED_IDLE)
+            if self.settings.audio.cues:
+                self.player.cue(self.cues.tx_done)
+            self.state.flash("sent")
+        self._wake.set()
+
+    # --- main loop -------------------------------------------------------
+    def _sync_state(self):
+        self.state.wifi_level = self.status.sample().wifi_level
+        if self.chat is not None and self.state.screen in (CHATS, CHAT):
+            self.chat.refresh()       # voice sent or played changes the bubbles
+        if self.recorder.recording:
+            self.state.record_level = self.recorder.level
+            self.state.record_seconds = self.recorder.elapsed
+            if self.state.record_seconds >= self.settings.audio.max_record_seconds:
+                self._on_talk_end(self.state.record_seconds)
+        if self.link is not None:
+            stats = self.link.stats
+            self.state.queued = self.link.pending()
+            self.state.duty_fraction = self.link.budget.fraction_used()
+            remaining = self.link.budget.remaining_seconds()
+            self.state.duty_remaining = 999 if remaining == float("inf") else remaining
+            if stats.last_rssi is not None:
+                self.state.last_rssi = stats.last_rssi
+            self.state.stats = {
+                "packets_tx": stats.packets_tx, "packets_rx": stats.packets_rx,
+                "frames_dropped": stats.frames_dropped,
+                "messages_rx": stats.messages_rx,
+                "air": f"{self.settings.radio.air_speed / 1000:g}k",
+            }
+        self.state.unread = self.inbox.unread
+        self._update_link_status()
+        # Leaving the range test any way at all ends it: nothing probes
+        # behind another screen.
+        if self.range_test is not None and self.state.screen not in (RANGE, EDIT):
+            self._stop_range_test()
+
+        if (self.link is not None and not self._warned_config_mode
+                and self.link.stats.config_mode_replies >= 3):
+            # The module answers FF FF FF to everything: M1 is held high.
+            self._warned_config_mode = True
+            self.state.radio_note = "radio stuck in setup mode (M1 high)"
+            self.state.flash("radio in setup mode: run the installer", 10.0)
+
+        # Leaving the pairing screen any way at all -- a hold to talk, say
+        # -- ends pairing, so it never beacons behind another screen.
+        if self._pairing and self.state.screen not in (PAIR, EDIT):
+            self._stop_pairing()
+
+        # Link state for the contact dots and the Talk screen's warning.
+        self.state.link_states = self._link_states()
+        target, _name = self._target
+        broadcast = target == protocol.BROADCAST
+        # Stale counts as connected: the handshake succeeded and nothing
+        # has contradicted it. Only never-linked or refused is "not
+        # connected", which is what the operator can actually act on.
+        target_state = self.state.link_states.get(target)
+        self.state.target_linked = broadcast or target_state in (
+            protocol.LINK_LINKED, protocol.LINK_STALE)
+        self._refresh_menus()
+
+        # Quietly re-call anything not linked while its page is open. A
+        # hello is 13 bytes; sitting there saying "not connected" when one
+        # small packet would fix it is the worse trade.
+        if (self.state.screen == TALK and not broadcast
+                and target_state not in (protocol.LINK_LINKED,
+                                         protocol.LINK_CALLING,
+                                         protocol.LINK_REJECTED)):
+            now = time.monotonic()
+            if now - self._last_recall >= RECALL_SECONDS:
+                self._last_recall = now
+                self._call(target)
+
+        power = self.battery.poll()
+        self.state.battery_present = power.present
+        self.state.battery_summary = power.compact()
+        self.state.battery_detail = power.summary()
+        self.state.battery_percent = power.percent
+        self.state.battery_charging = bool(getattr(power, "charging", False))
+        self.state.battery_low = power.low
+        if power.critical and not self._warned_critical:
+            self._warned_critical = True
+            self.state.flash("battery critical", 8.0)
+            self.player.cue(self.cues.error)
+        elif not power.critical:
+            self._warned_critical = False
+
+    def _follow_idle_with_the_microphone(self):
+        """Keep the capture stream alive only while the radio is in use.
+
+        A warm codec makes push-to-talk instant but draws current
+        continuously, so arming tracks the backlight: lit means the
+        operator is here and PTT must not lose their first word; blanked
+        means the radio is idle and the codec should power down.
+        """
+        if not self.recorder.available or self.recorder.recording:
+            return
+        # Backgrounded: nobody can press talk, so the codec can power down
+        # even though our own backlight tracking says the screen is lit.
+        # And only where a hold can talk: elsewhere the pre-roll would keep
+        # the codec powered for a press that cannot happen.
+        should_be_armed = (self.foregrounded and not self.display.screen_off
+                           and self._can_talk())
+        if should_be_armed and not self.recorder.armed:
+            self.recorder.arm()
+        elif not should_be_armed and self.recorder.armed:
+            self.recorder.disarm()
+
+    def _radio_is_busy(self) -> bool:
+        """Is the radio mid-message, in either direction?
+
+        Redrawing now flips the module's mode partway through a packet:
+        a lost fragment inbound, or a corrupted one outbound. The screen
+        can wait the second or two it takes.
+        """
+        if self.link is None:
+            return False
+        return bool(self.link.reassembling) or self.state.radio_state == SENDING
+
+    def _next_timeout(self) -> float:
+        """How long we may sleep before something needs attention.
+
+        Returning None means "sleep until an event happens" -- the deep
+        idle case, and the reason this app costs nothing when quiet.
+        """
+        animating = FRAME_INTERVAL.get(self.state.radio_state)
+        if animating:
+            return animating
+        if self._radio_is_busy():
+            # Nothing to draw and nothing to poll: wake on the packet.
+            return None
+        deadlines = [self.display.next_idle_deadline()]
+        if self.state.active_banner:
+            deadlines.append(max(0.05, self.state.banner_until - time.monotonic()))
+        if self.link is not None and self.link.reassembling:
+            deadlines.append(self.settings.power.tick_seconds)
+        if self.settings.power.beacon_interval_seconds:
+            deadlines.append(max(1.0, self._beacon_due - time.monotonic()))
+        if self._pairing:
+            deadlines.append(self._pairing_deadline())
+        now = time.monotonic()
+        if self.link is not None and self.settings.radio.link_check_seconds:
+            deadlines.append(max(0.5, self._check_due - now))
+        if self.monitor is not None:
+            change = self.monitor.next_change(now)
+            if change is not None:
+                deadlines.append(max(0.5, change))
+        if self.range_test is not None:
+            deadlines.append(self.range_test.next_deadline(now))
+        if self.state.battery_present:
+            # A wakeup a minute is nothing against a device drawing half
+            # an amp, and it is exactly when the charge matters.
+            deadlines.append(max(5.0, self.battery.seconds_until_next_poll()))
+        soonest = min(deadlines)
+        return None if soonest == float("inf") else soonest
+
+    def run(self):
+        log.info(
+            "walkie up: mode=%s radio=%s audio=%s codec2=%s",
+            self.mode, "ok" if self.link else "offline",
+            self.state.audio_note, self.state.codec_name,
+        )
+        self.input.start()
+        self.status.start()
+        # Warm the codec now: a cold open costs ~690 ms of lost speech,
+        # and the operator may press talk the moment the app appears.
+        if self.recorder.available:
+            self.recorder.arm()
+        self._beacon_due = time.monotonic() + (
+            self.settings.power.beacon_interval_seconds or 1e9)
+        if self.link is not None:
+            self._call_known_contacts()
+
+        while self.running:
+            self._sync_state()
+            # Hold the screen still while a message is in flight, then
+            # catch up the moment it lands.
+            if self._radio_is_busy():
+                self._display_stale = True
+            else:
+                if self._display_stale:
+                    self.display.invalidate()
+                    self._display_stale = False
+                screens.render(self.display, self.state)
+            self.display.apply_idle_policy(keep_awake=self.state.busy)
+            self._follow_idle_with_the_microphone()
+            self._prompt_pending_pair()
+
+            timeout = self._next_timeout()
+            self._wake.wait(timeout)
+            self._wake.clear()
+
+            if self._pairing:
+                self._pairing_tick()
+            self._link_check_tick()
+            self._range_tick()
+            if self.link is not None:
+                if self.link.reassembling:
+                    self.link.tick()
+                if (self.settings.power.beacon_interval_seconds
+                        and time.monotonic() >= self._beacon_due):
+                    self.link.send_hello()
+                    self._beacon_due = time.monotonic() + \
+                        self.settings.power.beacon_interval_seconds
+
+        self._shutdown()
+
+    def stop(self, reason: str = "normal"):
+        self._exit_reason = reason
+        self._closing = True
+        self.running = False
+        self._wake.set()
+
+    def _shutdown(self):
+        log.info("shutting down (%s)", self._exit_reason)
+        self._stop_range_test()
+        try:
+            self.recorder.close()
+            self.player.stop()
+        except Exception:
+            pass
+        self.input.stop()
+        self.status.stop()
+        if self.link is not None:
+            self.link.stop()
+        if self.radio is not None:
+            self.radio.close()
+        if self.codec is not None:
+            self.codec.close()
+        self.roster.save()
+        self.inbox.save()
+        try:
+            self.display.set_led(theme.LED_IDLE)
+            # Hand the panel back lit: the daemon inherits this brightness
+            # for its desktop and never resets it, so blanking here leaves
+            # the user staring at what looks like broken hardware.
+            self.display.restore_backlight()
+            if hasattr(self.board, "prepare_exit"):
+                self.board.prepare_exit()
+            if hasattr(self.board, "release_focus"):
+                self.board.release_focus()
+            self.board.cleanup()
+        except Exception:
+            log.debug("board cleanup failed", exc_info=True)
+        log.info(
+            "frames pushed %d, skipped %d; backlight handed back at %s%%",
+            self.display.frames_pushed, self.display.frames_skipped,
+            self.display._backlight,
+        )
+
+
+def main():
+    settings = settings_module.load()
+
+    # Two instances fight the daemon for focus several times a second and
+    # interleave bytes into the same radio. Refuse rather than thrash.
+    try:
+        lock = SingleInstance(settings.data_dir).acquire()
+    except AlreadyRunning as exc:
+        # Exit quietly, and above all do not ask the daemon for focus.
+        # The daemon binds focus to the process it spawned and revokes it
+        # when that process exits, so a stub that grabs focus and quits
+        # makes the screen flick to the app and straight back to the
+        # desktop, over and over. The app must be launched by the daemon,
+        # not by systemd -- see tools/launch_via_daemon.py.
+        log.info("%s; leaving it alone", exc)
+        return 0
+
+    app = WalkieApp(settings)
+
+    def handle_signal(signum, _frame):
+        log.info("signal %s", signum)
+        app.stop("signal")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, handle_signal)
+
+    try:
+        app.run()
+    except KeyboardInterrupt:
+        app.stop("keyboard")
+        app._shutdown()
+    finally:
+        lock.release()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

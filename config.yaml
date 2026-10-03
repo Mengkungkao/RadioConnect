@@ -1,0 +1,94 @@
+# LoRa Walkie-Talkie configuration.
+#
+# Every value here has a working default in app/config/settings.py, so
+# an empty file still runs. Environment variables win over this file:
+#   WALKIE_RADIO_ADDRESS=7 WALKIE_IDENTITY_CALLSIGN=Rover ./run.sh
+
+radio:
+  port: /dev/ttyS0
+  # This radio's Device ID, 0-65534 (65535 is broadcast). "auto" picks an
+  # unused one on first start and keeps it in ~/.whisplay-walkie. Change
+  # it on the device under Settings > Device ID; it takes effect at once.
+  address: auto
+  # Privacy channel, 1-16. Radios on different channels share the
+  # frequency but ignore each other completely. Change it on the device
+  # under Settings > Privacy channel.
+  privacy_channel: 1
+  frequency_mhz: 868
+  # Air rate, not UART rate. Lower reaches further but takes longer per
+  # message: 2400 hears about 6 dB weaker signals than 9600 (roughly twice
+  # the distance in the open), and a voice message takes four times the
+  # airtime. It must match the module: change it with
+  #   sudo python3 provision_radio.py --range long
+  # on every radio, which writes the module and this line together.
+  air_speed: 9600
+  power_dbm: 22
+  uart_baud: 9600
+  # ETSI caps EU 868 at 1% duty cycle: 36 seconds of transmit per hour.
+  # The app enforces it. Set 100 only where you are licensed to.
+  duty_cycle_percent: 1.0
+  # Paired radios ping each other this often so each shows whether the
+  # other is in range (Start > To a paired device). 0 turns it off.
+  link_check_seconds: 120
+  # Home > Range test sends a probe this often.
+  range_test_seconds: 30
+  # M0/M1. Leave null: GPIO 22 and 27 belong to the Whisplay LCD, and
+  # the module is configured once by provision_radio.py instead. Fill in
+  # [m0, m1] only if you rewired the mode pins to free GPIOs.
+  # Pins to actively drive. Leave null with the stock jumpers: GPIO 22/27
+  # belong to the LCD and claiming them makes the radio fail to open.
+  mode_pins: null
+  # Where M0/M1 physically are, whether or not we drive them.
+  wired_mode_pins: [22, 27]
+
+identity:
+  # The name other radios see. "auto" uses this machine's hostname.
+  callsign: auto
+
+audio:
+  # "auto" picks the Whisplay card when it exists, else the first real
+  # capture/playback card. Override for a USB headset, e.g. plughw:2.
+  capture_device: auto
+  playback_device: auto
+  preferred_card: whisplay
+  # Microphone level (the Whisplay card's "mic" control), set at every
+  # start. 100% overdrives the preamp and sounds muddy; 80 is clear.
+  mic_level: 80
+  # Codec2 mode. 3200 is the clearest and the default; 1600 is half the
+  # airtime; 700C packs the most messages into the hour but sounds
+  # robotic. Change it on the device under Settings > Voice quality.
+  codec_mode: "3200"
+  max_record_seconds: 20
+  cues: true
+
+ui:
+  brightness: 80
+  # The backlight dominates power draw, so it steps down while idle and
+  # returns on any button press or received packet.
+  idle_dim_seconds: 25
+  idle_dim_brightness: 15
+  idle_off_seconds: 120
+  led_enabled: true
+
+input:
+  debounce_ms: 75
+  # Measured on this button: deliberate multi-clicks land 158-522 ms
+  # apart, ordinary clicks 1214 ms or more. 700 ms is the empty band.
+  click_window_ms: 700
+  # Push-to-talk opens the mic this long after the press (talk screens).
+  hold_ms: 350
+  # Elsewhere a hold opens the highlighted row after this long, and acts
+  # on release -- MFruit OS's own long press, so menus feel the same.
+  long_press_ms: 700
+
+power:
+  # Periodic "I am here" beacons cost duty-cycle budget. Off by default;
+  # set e.g. 900 to announce yourself every 15 minutes.
+  beacon_interval_seconds: 0
+  tick_seconds: 5
+
+# Contacts. Normally left empty: pair radios on the device instead, under
+# Home > Pair devices, which saves them with their keys. Entries here are
+# shown on every radio that uses this file, but cannot be talked to
+# until paired: pairing is what sets up the keys.
+contacts: []

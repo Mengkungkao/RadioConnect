@@ -9,9 +9,29 @@ uses WalkieTalkie's radio protocol (version 3), so it works with radios still
 running WalkieTalkie. Radios running the old Messenger use a different
 protocol and need RadioConnect to talk to it.
 
-> **Status: 0.1.0, in development.** Today RadioConnect is WalkieTalkie,
-> repackaged as a native MFruit OS app. Chat and SOS are being added
-> ([CONTINUE.md](CONTINUE.md)). It is not a certified emergency service.
+> **Status: 0.1.0, in development.** WalkieTalkie's voice, pairing and
+> settings, plus **Chats**. SOS is next ([CONTINUE.md](CONTINUE.md)). It is
+> not a certified emergency service.
+
+## Chats
+
+**Home → Chats** lists *Everyone*, then each paired radio, with the newest
+conversation first and how many messages are unread. A conversation shows
+texts and voice messages as bubbles, oldest at the top:
+
+| In a conversation | Button | Keyboard |
+|---|---|---|
+| Send a voice message to this radio | hold, talk, release | hold Space |
+| Write a text | — | type; Enter sends, Esc cancels, Backspace erases |
+| Quick reply ("OK", "On my way", "Need help", …) | 3× | Enter on **Reply** |
+| Play a voice message | select it, then 3× | select it, then Enter |
+| Move between messages | tap / 2× | Down / Up |
+| Back to Chats | 4× | Esc |
+
+A text to one radio shows ✓ once it is on the air and ✓✓ once that radio
+confirms it arrived. WalkieTalkie radios do not confirm, so texts to them
+stop at ✓, and so do texts to *Everyone*. A text that could not go out says
+**not sent**.
 
 ## Install
 
@@ -81,4 +101,3 @@ python3 ~/MFruitOS/scripts/check-app.py . # MFruit OS package check
 
 As in WalkieTalkie; see the
 [reference](docs/walkietalkie-reference.md#licence-and-credits).
-# RadioConnect

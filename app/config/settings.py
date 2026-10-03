@@ -1,0 +1,296 @@
+"""Configuration: YAML file, environment overrides, sane defaults.
+
+Every default here is chosen so the app starts and does something useful
+on this specific Pi even with an empty config.yaml -- including the two
+cases that are currently true of the hardware: no audio codec, and no
+access to the M0/M1 mode pins.
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+
+from app.utils.logger import get_logger
+
+log = get_logger("settings")
+
+CONFIG_NAME = "config.yaml"
+ENV_PREFIX = "RADIOCONNECT_"
+
+
+@dataclass
+class RadioSettings:
+    port: str = "/dev/ttyS0"
+    # This radio's Device ID. None ("auto" in config.yaml) means pick an
+    # unused one on first start and keep it; see overrides.apply.
+    address: int | None = None
+    # Radios on different privacy channels share the frequency but ignore
+    # each other, like the privacy codes on a handheld walkie-talkie.
+    privacy_channel: int = 1
+    frequency_mhz: int = 868
+    # Must match what the module was provisioned with (MFruit OS's setup-radio.sh
+    # writes both): pacing and the duty-cycle budget are worked out from it.
+    air_speed: int = 9600
+    power_dbm: int = 22
+    uart_baud: int = 9600
+    duty_cycle_percent: float = 1.0
+    # Paired radios ping each other this often, to show which are in range
+    # (about 0.16 s of airtime each at 9.6k). 0 turns it off.
+    link_check_seconds: float = 120.0
+    # Home > Range test probes the other radio this often.
+    range_test_seconds: float = 30.0
+    # Pins the app should actively drive to select the module's mode.
+    # Left unset because GPIO 22 and 27 belong to the Whisplay LCD: the
+    # daemon holds them through gpiod, so claiming them throws and the
+    # radio fails to open at all. Fill this in only once M0/M1 have been
+    # rewired to free lines.
+    mode_pins: list | None = None
+    # Where M0/M1 are *physically* connected, whether or not we drive
+    # them. With the LoRa HAT's stock jumpers that is the LCD's backlight
+    # and data/command lines, which is what makes the module deaf and
+    # what pins the backlight on. Kept separate from mode_pins because
+    # the conflict exists even when the app never touches the pins.
+    wired_mode_pins: list = field(default_factory=lambda: [22, 27])
+
+
+@dataclass
+class IdentitySettings:
+    # "auto" is the hostname, which is usually already unique per device
+    # and is what the operator calls the machine anyway.
+    callsign: str = "auto"
+
+
+@dataclass
+class AudioSettings:
+    capture_device: str = "auto"
+    playback_device: str = "auto"
+    preferred_card: str = "whisplay"
+    # The Whisplay card's "mic" control, set at every start so all radios
+    # sound alike. The driver turns it into analog boost: 100% is +29 dB,
+    # which overdrove the Pi's preamp on ordinary speech and made it sound
+    # muddy; 80% (+20 dB) is what the radio that sounded clear had. None
+    # leaves the mixer as it is.
+    mic_level: int | None = 80
+    # Codec2 mode: 3200 is the clearest, 700C packs the most messages into
+    # the hour's airtime. Settings > Voice quality changes it on the device.
+    codec_mode: str = "3200"
+    max_record_seconds: float = 20.0
+    cues: bool = True
+
+
+@dataclass
+class UiSettings:
+    brightness: int = 80
+    # The backlight is by far the biggest power draw on the HAT, so it
+    # steps down twice while idle and comes back on any button or packet.
+    idle_dim_seconds: float = 25.0
+    idle_dim_brightness: int = 15
+    idle_off_seconds: float = 120.0
+    led_enabled: bool = True
+
+
+@dataclass
+class InputSettings:
+    debounce_ms: int = 75
+    # 700 ms sits in the empty band measured on this button between
+    # deliberate multi-clicks (158-522 ms apart) and ordinary browsing
+    # clicks (>= 1214 ms apart). 400 ms splits genuine quad-clicks.
+    click_window_ms: int = 700
+    # Push-to-talk starts this long after the press, well above the
+    # 30-60 ms a real click lasts, and low enough to feel immediate.
+    hold_ms: int = 350
+    # On every other screen a hold opens the highlighted row after this
+    # long (acting on release), the same as MFruit OS's long press. Longer
+    # than a talk hold: choosing is deliberate, talking should be instant.
+    long_press_ms: int = 700
+
+
+@dataclass
+class PowerSettings:
+    # 0 disables periodic presence beacons entirely. Each one costs
+    # airtime out of the duty-cycle budget, so it is off by default.
+    beacon_interval_seconds: float = 0.0
+    tick_seconds: float = 5.0
+
+
+@dataclass
+class Contact:
+    name: str
+    address: int
+
+    @property
+    def is_broadcast(self) -> bool:
+        return self.address == 0xFFFF
+
+
+@dataclass
+class Settings:
+    radio: RadioSettings = field(default_factory=RadioSettings)
+    identity: IdentitySettings = field(default_factory=IdentitySettings)
+    audio: AudioSettings = field(default_factory=AudioSettings)
+    ui: UiSettings = field(default_factory=UiSettings)
+    input: InputSettings = field(default_factory=InputSettings)
+    power: PowerSettings = field(default_factory=PowerSettings)
+    contacts: list = field(default_factory=list)
+    source: str = "defaults"
+
+    @property
+    def data_dir(self) -> Path:
+        # Under MFruit OS the app's data lives where updates snapshot it and
+        # the Fruit Store can reset or delete it (WHISPLAY_OS_APP_DATA).
+        path = Path(os.getenv(f"{ENV_PREFIX}DATA_DIR")
+                    or os.getenv("WHISPLAY_OS_APP_DATA")
+                    or Path.home() / ".radioconnect")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+
+def _coerce(target, values: dict):
+    """Apply a dict onto a dataclass, ignoring unknown keys."""
+    known = {f.name: f.type for f in fields(target)}
+    for key, value in (values or {}).items():
+        if key not in known:
+            log.warning("ignoring unknown setting %s.%s", type(target).__name__, key)
+            continue
+        setattr(target, key, value)
+
+
+def _auto(value) -> bool:
+    return value is None or (isinstance(value, str)
+                             and value.strip().lower() in ("", "auto"))
+
+
+def _normalise_identity(settings: Settings):
+    """Turn config.yaml's "auto" and stray strings into real values."""
+    address = settings.radio.address
+    if _auto(address):
+        settings.radio.address = None
+    else:
+        try:
+            address = int(address)
+        except (TypeError, ValueError):
+            address = -1
+        if not 0 <= address <= 0xFFFE:
+            log.warning("radio.address %r is not 0-65534; picking one instead",
+                        settings.radio.address)
+            address = None
+        settings.radio.address = address
+
+
+def hostname_callsign() -> str:
+    name = socket.gethostname().split(".")[0].strip()
+    return name[:16] or "radio"
+
+
+def _apply_env(settings: Settings):
+    """RADIOCONNECT_RADIO_PORT, RADIOCONNECT_IDENTITY_CALLSIGN, ... override the file."""
+    sections = {
+        "RADIO": settings.radio, "IDENTITY": settings.identity,
+        "AUDIO": settings.audio, "UI": settings.ui,
+        "INPUT": settings.input, "POWER": settings.power,
+    }
+    for name, section in sections.items():
+        for spec in fields(section):
+            key = f"{ENV_PREFIX}{name}_{spec.name.upper()}"
+            raw = os.getenv(key)
+            if raw is None:
+                continue
+            current = getattr(section, spec.name)
+            try:
+                if isinstance(current, bool):
+                    value = raw.strip().lower() in ("1", "true", "yes", "on")
+                elif isinstance(current, int):
+                    value = int(raw)
+                elif isinstance(current, float):
+                    value = float(raw)
+                else:
+                    value = raw
+            except ValueError:
+                log.warning("%s=%r is not valid for %s", key, raw, spec.name)
+                continue
+            setattr(section, spec.name, value)
+            log.info("%s overridden from environment", key)
+
+
+def load(path: str | None = None) -> Settings:
+    settings = Settings()
+    candidate = Path(path) if path else Path(__file__).resolve().parents[2] / CONFIG_NAME
+
+    raw = {}
+    if candidate.is_file():
+        try:
+            import yaml
+
+            raw = yaml.safe_load(candidate.read_text()) or {}
+            settings.source = str(candidate)
+        except ImportError:
+            log.warning("PyYAML missing; using defaults (pip install pyyaml)")
+        except Exception:
+            log.exception("could not parse %s; using defaults", candidate)
+    else:
+        log.info("no %s found; using defaults", candidate)
+
+    _coerce(settings.radio, raw.get("radio"))
+    _coerce(settings.identity, raw.get("identity"))
+    _coerce(settings.audio, raw.get("audio"))
+    _coerce(settings.ui, raw.get("ui"))
+    _coerce(settings.input, raw.get("input"))
+    _coerce(settings.power, raw.get("power"))
+
+    settings.contacts = [
+        Contact(name=str(entry.get("name", f"node {entry.get('address')}")),
+                address=int(entry["address"]))
+        for entry in (raw.get("contacts") or [])
+        if isinstance(entry, dict) and entry.get("address") is not None
+    ]
+    _normalise_identity(settings)
+
+    # Device-set values sit above config.yaml but below the environment,
+    # so a one-off RADIOCONNECT_* override still wins for debugging. This is
+    # also where a fresh install is given its Device ID, and saves it.
+    try:
+        from app.store.overrides import Overrides, apply as apply_overrides
+
+        apply_overrides(settings, Overrides(settings.data_dir))
+    except Exception:
+        log.warning("could not apply saved device settings", exc_info=True)
+
+    if settings.radio.address is None:
+        # Only if the settings file could not be written: still run, on an
+        # ID that will not survive a restart.
+        import random
+
+        settings.radio.address = random.randint(1, 0xFFFE)
+        log.warning("using temporary Device ID %d", settings.radio.address)
+    _apply_env(settings)
+    if _auto(settings.identity.callsign):
+        settings.identity.callsign = hostname_callsign()
+
+    clashing = [c.name for c in settings.contacts
+                if c.address == settings.radio.address]
+    if clashing:
+        log.error(
+            "radio.address is %d, but contact(s) %s use that address too. "
+            "Two nodes on one address cannot talk: each drops the other's "
+            "traffic as its own echo. Give every node a unique address.",
+            settings.radio.address, ", ".join(clashing),
+        )
+
+    try:
+        channel = int(settings.radio.privacy_channel)
+    except (TypeError, ValueError):
+        channel = 0
+    if channel not in range(1, 17):
+        log.warning("radio.privacy_channel %r is not 1-16; using 1",
+                    settings.radio.privacy_channel)
+        channel = 1
+    settings.radio.privacy_channel = channel
+
+    if settings.radio.mode_pins and len(settings.radio.mode_pins) != 2:
+        log.warning("radio.mode_pins must be [M0, M1]; ignoring %r",
+                    settings.radio.mode_pins)
+        settings.radio.mode_pins = None
+    return settings
