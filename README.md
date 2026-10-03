@@ -97,15 +97,13 @@ stop at ✓, and so do texts to *Everyone*. A text that could not go out says
    bash ~/.whisplay-os/system/current/scripts/setup-radio.sh
    ```
 
-2. Install RadioConnect from a local copy of this folder:
+2. Install RadioConnect from **Fruit Store → RadioConnect → Install**, or
+   `mfruitctl catalog radioconnect` over SSH. MFruit OS downloads the reviewed
+   release pinned in its catalogue, checks its SHA-256, runs `install.sh`
+   (checks only, no sudo) and `test.sh`, then adds RadioConnect to Home.
 
-   ```bash
-   mfruitctl sideload ~/RadioConnect
-   ```
-
-   Or use **Fruit Store → Local packages**. MFruit OS checks the package,
-   runs `install.sh` (checks only, no sudo) and `test.sh`, then adds
-   RadioConnect to Home.
+   A local copy works too: `mfruitctl sideload ~/RadioConnect`, or
+   **Fruit Store → Local packages**.
 
 **Fruit Store → RadioConnect** updates, rolls back, resets, uninstalls and
 deletes it (also `mfruitctl rollback|reset|uninstall|delete radioconnect`).
