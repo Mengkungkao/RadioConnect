@@ -14,4 +14,5 @@ def private_radio_store(tmp_path, monkeypatch):
     monkeypatch.delenv("WHISPLAY_OS_HOME", raising=False)
     # Nor the app's own data folder, managed or not.
     monkeypatch.setenv("RADIOCONNECT_DATA_DIR", str(tmp_path / "radioconnect-data"))
+    monkeypatch.setenv("WALKIE_DATA_DIR", str(tmp_path / "walkietalkie-data"))
     monkeypatch.delenv("WHISPLAY_OS_APP_DATA", raising=False)

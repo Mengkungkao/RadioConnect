@@ -92,6 +92,25 @@ RETRIEVE_ANSWER_GAP = 15.0
 RETRIEVE_ANSWERS_MAX = 3
 
 
+# How long a message may wait for the hour's airtime to free up before it is
+# dropped. Waiting shows as "pending" with a countdown in the app.
+MAX_AIRTIME_WAIT = 600.0
+
+
+@dataclass
+class TxStatus:
+    """What the transmit thread is doing, for the app's "pending" pill."""
+    label: str
+    dst: int
+    sent: int                    # packets already on the air
+    total: int
+    waiting_until: float = 0.0   # monotonic: holding for airtime until then
+
+    @property
+    def kind(self) -> str:
+        return self.label.partition("/")[0]
+
+
 class NotPaired(Exception):
     """There is no key to seal a message to this station with."""
 
@@ -172,6 +191,8 @@ class Stats:
 class LoraLink:
     """Reliable-ish message transport over the SX126X."""
 
+    sending = None                      # TxStatus while a message is going out
+
     def __init__(self, radio: SX126x, air_speed: int = 9600,
                  duty_cycle_percent: float = 1.0, callsign: str = "",
                  addr: int | None = None, token: bytes | None = None,
@@ -207,6 +228,7 @@ class LoraLink:
         self._on_message = None
         self._on_tx_progress = None
         self._on_sent = None
+        self.sending = None             # TxStatus while a message is going out
         self._on_hello = None
         self._on_clash = None
         self._on_retrieve = None
@@ -899,22 +921,27 @@ class LoraLink:
         total = len(packets)
         for index, packet in enumerate(packets):
             if not self._running.is_set():
+                self.sending = None
                 return
             frame = encode_frame(packet)
 
             wait = self.budget.wait_seconds(len(frame))
             if wait > 0:
-                if wait > 60:
+                if wait > MAX_AIRTIME_WAIT:
                     # Refusing beats stalling for an hour with no feedback.
                     log.warning(
                         "%s dropped: duty cycle exhausted, %.0fs until it fits",
                         label, wait,
                     )
                     self.stats.errors.append("duty cycle full")
+                    self.sending = None
                     self._report_sent(label, False)
                     return
                 log.info("holding %s for %.1fs to stay inside duty cycle", label, wait)
+                # The app shows this as "pending" with a countdown.
+                self.sending = TxStatus(label, dst, index, total, time.monotonic() + wait)
                 time.sleep(wait)
+            self.sending = TxStatus(label, dst, index, total)
 
             try:
                 # A module broadcast whatever the destination: the header
@@ -923,6 +950,7 @@ class LoraLink:
             except Exception:
                 log.exception("transmit failed for %s", label)
                 self.stats.errors.append("tx failed")
+                self.sending = None
                 self._report_sent(label, False)
                 return
 
@@ -943,6 +971,7 @@ class LoraLink:
 
         log.info("sent %s: %d packet(s) to %s", label, total,
                  "all" if dst == protocol.BROADCAST else dst)
+        self.sending = None
         self._report_sent(label, True)
 
     def _report_sent(self, label: str, ok: bool):

@@ -71,7 +71,7 @@ SIGNAL_SLOT = 20
 EDITOR_TITLES = {
     "DEVICE ID": "Device ID", "NAME": "Name", "CHANNEL": "Channel", "VOICE": "Voice",
     "BASE STATION": "Base", "DATE & TIME": "Clock", "RESET": "Reset",
-    "PAIRING": "Pairing",
+    "PAIRING": "Pairing", "UNPAIR": "Unpair",
 }
 PAGE_TITLES = {HOME: "Radio", START: "Talk", CONTACTS: "Paired", INBOX: "Receive",
                STATUS: "Status", SETTINGS: "Settings", PAIR: "Pair", RANGE: "Range",
@@ -108,6 +108,9 @@ class ViewState:
     address: int = 0
     channel: int = 1
     frequency_mhz: int = 868
+    air_speed: int = 9600
+    # False until MFruit OS's radio setup recorded the module's settings.
+    radio_setup: bool = True
 
     home_items: list = field(default_factory=list)
     home_index: int = 0
@@ -195,6 +198,9 @@ class ViewState:
     codec_name: str = "700C"
     banner: str = ""
     banner_until: float = 0.0
+    # A message of yours still waiting or going out ("pending: voice to Base ·
+    # airtime in 0:42"): shown on every screen until it is on the air.
+    outbox: str = ""
     stats: dict = field(default_factory=dict)
 
     @property
@@ -220,6 +226,14 @@ class ViewState:
         if self.screen == CHAT:
             return self.compose is None and self.chat_index == len(self.chat_items) + 1
         return self.screen == STATUS
+
+    @property
+    def start_row(self) -> str:
+        """Talk's selected row: "to" (a radio, or everyone), "replay",
+        "chats" or "back"."""
+        if not self.start_items:
+            return "back"
+        return self.start_items[self.start_index % len(self.start_items)]["key"]
 
     @property
     def busy(self) -> bool:
@@ -282,12 +296,13 @@ def draw_footer(draw, state: ViewState, hints: list):
 
         hints = navigation.hints(state.screen, inbox_empty=not state.inbox,
                                  armed=state.armed,
-                                 back_selected=state.back_selected) or hints
+                                 back_selected=state.back_selected,
+                                 start_row=state.start_row) or hints
     footer(canvas, hints)
-    banner = state.active_banner
+    banner = state.active_banner or state.outbox
     if banner:
         toast(canvas, banner, y=BACK_TOP - 34 if state.screen in
-              (CONTACTS, INBOX, PAIR, STATUS) else FOOTER_Y - 40)
+              (CONTACTS, INBOX, PAIR, STATUS, CHAT) else FOOTER_Y - 40)
 
 
 # --- contacts ----------------------------------------------------------
@@ -308,7 +323,7 @@ def draw_contacts(draw, state: ViewState):
     draw_back(draw, state)
 
     if not state.entries:
-        centred(draw, 110, "no paired radios yet", theme.font(15), theme.TEXT_DIM)
+        centred(draw, 110, "no paired radios", theme.font(15), theme.TEXT_DIM)
         centred(draw, 134, "Home > Pair devices, on", theme.font(12), theme.TEXT_FAINT)
         centred(draw, 152, "both radios", theme.font(12), theme.TEXT_FAINT)
         draw_footer(draw, state, _hints(CONTACTS))
@@ -417,6 +432,12 @@ def draw_talk(draw, state: ViewState):
         # straight through the level meter below.
         centred(draw, cy + radius + 4, f"{state.record_seconds:.1f}s",
                 theme.font(16, "bold"), theme.TEXT)
+    elif state.radio_state == SENDING and "airtime in" in state.outbox:
+        # Held for the hour's airtime: say so, and when it goes.
+        centred(draw, cy - 22, "pending", theme.font(18, "bold"), theme.WARN)
+        centred(draw, cy + 4, state.outbox.rpartition("airtime in ")[2],
+                theme.font(22, "bold"), theme.TEXT)
+        centred(draw, cy + radius + 6, "waiting for airtime", theme.font(13), theme.TEXT_DIM)
     elif state.radio_state == SENDING:
         fraction = state.tx_sent / state.tx_total if state.tx_total else 0.0
         centred(draw, cy - 14, f"{int(fraction * 100)}%",
@@ -488,7 +509,14 @@ def draw_talk(draw, state: ViewState):
         centred(draw, 228, f"airtime {state.duty_fraction * 100:.0f}% used",
                 theme.font(11), theme.WARN)
 
-    draw_footer(draw, state, _hints(TALK))
+    if state.screen == TALK:
+        draw_footer(draw, state, _hints(TALK))
+    else:
+        # Talking from Talk's list or a conversation: the button is held, so
+        # the only thing to say is what letting go does.
+        footer(Canvas.over(draw, theme.MFRUIT),
+               [("release", "to send")] if state.radio_state == RECORDING
+               else [("", "sending…")])
 
 
 # --- inbox -------------------------------------------------------------
@@ -553,7 +581,8 @@ def draw_status(draw, state: ViewState):
         ("Station", [
             ("name", state.callsign or "-"),
             ("id", f"{state.address}  ·  channel {state.channel}  ·  encrypted"),
-            ("freq", f"{state.frequency_mhz} MHz  ·  air {stats.get('air', '?')}"
+            ("freq", ("" if state.radio_setup else "not set up  ·  ")
+                     + f"{state.frequency_mhz} MHz  ·  air {stats.get('air', '?')}"
                      f"  ·  codec2 {state.codec_name}"),
         ]),
         ("Link", [
@@ -637,7 +666,8 @@ def draw_menu(draw, state: ViewState, screen: str, title: str, items: list,
 
 def draw_home(draw, state: ViewState):
     small = theme.font(11)
-    me = f"{state.callsign or 'this radio'}  ·  ID {state.address}  ·  ch {state.channel}"
+    me = (f"{state.callsign or 'this radio'} · ID {state.address} · ch {state.channel}"
+          f" · {state.frequency_mhz} MHz")
     draw_menu(draw, state, HOME, PAGE_TITLES[HOME], state.home_items, state.home_index,
               top_offset=18)
     centred(draw, CONTENT_TOP, ellipsise(draw, me, small, theme.SCREEN_WIDTH - 2 * MARGIN),
@@ -645,7 +675,30 @@ def draw_home(draw, state: ViewState):
 
 
 def draw_start(draw, state: ViewState):
-    draw_menu(draw, state, START, PAGE_TITLES[START], state.start_items, state.start_index)
+    """Talk: pick a radio by moving to it; holding talks to it right there."""
+    if state.radio_state in (RECORDING, SENDING):
+        draw_talk(draw, state)          # the big disc while talking and sending
+        return
+    from app.ui import navigation
+
+    draw_header(draw, state, PAGE_TITLES[START])
+    rows = [Row(item["label"], subtitle=str(item.get("value", "")) or None,
+                kind="back" if item["key"] == "back" else "action")
+            for item in state.start_items]
+    canvas = Canvas.over(draw, theme.MFRUIT)
+    draw_list(canvas, rows, state.start_index % len(rows) if rows else 0,
+              top=CONTENT_TOP + 18, empty="Nothing here")
+    small = theme.font(11, "bold")
+    if state.start_row == "to":
+        who = "everyone" if state.target_address == 0xFFFF else state.target_name
+        line, colour = f"hold to talk to {who}", theme.ACCENT
+    else:
+        line, colour = "move to a radio to talk", theme.TEXT_FAINT
+    centred(draw, CONTENT_TOP, ellipsise(draw, line, small, theme.SCREEN_WIDTH - 2 * MARGIN),
+            small, colour)
+    draw_footer(draw, state, navigation.hints(START, armed=state.armed,
+                                              back_selected=state.back_selected,
+                                              start_row=state.start_row))
 
 
 def draw_settings(draw, state: ViewState):
@@ -659,6 +712,17 @@ BUBBLE_MAX = 168
 BUBBLE_PAD = 6
 BUBBLE_GAP = 5
 TICKS = {"sending": "…", "sent": "✓", "delivered": "✓✓", "failed": "not sent"}
+UNCONFIRMED_SECONDS = 60
+
+
+def tick(item) -> str:
+    """✓ on the air, ✓✓ arrived; a message to one radio that nobody confirmed
+    within a minute says so (it may not have arrived, or the radio is older)."""
+    mark = TICKS.get(item.status, "")
+    if (item.status == "sent" and item.dst != 0xFFFF
+            and time.time() - item.received_at > UNCONFIRMED_SECONDS):
+        return mark + " not confirmed"
+    return mark
 
 
 def draw_chats(draw, state: ViewState):
@@ -690,15 +754,19 @@ def wrap(draw, text: str, font, width: int, max_lines: int = 6) -> list:
 
 
 def _bubble_text(item) -> tuple:
-    """(lines source, meta, colour) for one item."""
+    """(lines source, meta, colour) for one item. Received messages say who
+    sent them -- in Everyone, several radios share one conversation."""
     when = time.strftime("%H:%M", time.localtime(item.received_at))
+    if not item.outgoing:
+        when = f"{item.peer_name or f'radio {item.src}'} · {when}"
     if item.kind == "voice":
         gaps = " · gaps" if item.incomplete else ""
         new = "" if item.played or item.outgoing else " · new"
-        return f"▶ voice {item.duration:.0f}s", f"{when}{gaps}{new}", theme.VOICE
+        sent = f"  {tick(item)}" if item.outgoing and item.status else ""
+        return f"▶ voice {item.duration:.0f}s", f"{when}{gaps}{new}{sent}", theme.VOICE
     meta = when
     if item.outgoing:
-        meta += "  " + TICKS.get(item.status, "")
+        meta += "  " + tick(item)
     elif item.incomplete:
         meta += " · part missing"
     return item.text, meta, theme.TEXT
@@ -715,6 +783,9 @@ def _bubble_size(draw, item) -> tuple:
 
 def draw_chat(draw, state: ViewState):
     """One conversation: bubbles oldest at the top, then Reply and Back."""
+    if state.radio_state in (RECORDING, SENDING):
+        draw_talk(draw, state)          # talking from here: the same disc as Talk
+        return
     address, name = state.chat_peer or (0xFFFF, "Everyone")
     draw_header(draw, state, name)
     items = state.chat_items
@@ -781,14 +852,23 @@ def draw_pair(draw, state: ViewState):
     me = f"this radio: {state.callsign or '?'} · ID {state.address} · ch {state.channel}"
     centred(draw, CONTENT_TOP, ellipsise(draw, me, small, width), small,
             theme.TEXT_DIM)
+    # Two radios on different frequencies or air rates never hear each other,
+    # and nothing else says so: show what both must have in common.
+    air = radio_air(state)
+    centred(draw, CONTENT_TOP + 14,
+            ellipsise(draw, air if state.radio_setup else f"{air} · radio not set up",
+                      small, width),
+            small, theme.TEXT_DIM if state.radio_setup else theme.WARN)
     status = state.pair_status or "looking for radios"
-    centred(draw, CONTENT_TOP + 16, ellipsise(draw, status, status_font, width),
+    centred(draw, CONTENT_TOP + 30, ellipsise(draw, status, status_font, width),
             status_font, theme.ACCENT)
 
-    list_top = CONTENT_TOP + 38
+    list_top = CONTENT_TOP + 50
     if not state.pair_found:
         for index, line in enumerate(("On the other radio, open",
-                                      "Home > Pair devices too.")):
+                                      "Home > Pair devices too.",
+                                      "Both must show the same",
+                                      "MHz and air rate (above).")):
             centred(draw, list_top + 34 + index * 18, line, theme.font(12),
                     theme.TEXT_FAINT)
         draw_footer(draw, state, _hints(PAIR))
@@ -828,6 +908,11 @@ def draw_pair(draw, state: ViewState):
                 small, theme.TEXT_FAINT)
 
     draw_footer(draw, state, _hints(PAIR))
+
+
+def radio_air(state: ViewState) -> str:
+    """"920 MHz · 2.4k air": what two radios must share to hear each other."""
+    return f"{state.frequency_mhz} MHz · {state.air_speed / 1000:g}k air"
 
 
 # --- range test ----------------------------------------------------------

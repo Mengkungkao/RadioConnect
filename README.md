@@ -9,9 +9,63 @@ uses WalkieTalkie's radio protocol (version 3), so it works with radios still
 running WalkieTalkie. Radios running the old Messenger use a different
 protocol and need RadioConnect to talk to it.
 
-> **Status: 0.1.0, in development.** WalkieTalkie's voice, pairing and
-> settings, plus **Chats**. SOS is next ([CONTINUE.md](CONTINUE.md)). It is
-> not a certified emergency service.
+> **Status: 0.4.0, in development.** Talk, Chats, pairing and unpairing.
+> SOS is next ([CONTINUE.md](CONTINUE.md)). It is not a certified emergency
+> service.
+
+## Talk
+
+**Home → Talk** lists *Everyone* and each paired radio, then **Replay last
+voice**, **Conversations** and **Back**. You don't open a radio to talk to it:
+moving the selection onto it chooses it, and the line at the top says who a
+hold talks to.
+
+| On Talk | Button | Keyboard |
+|---|---|---|
+| Choose who to talk to | tap / 2× onto their row | Down / Up |
+| Talk to them | hold, talk, release | hold Space |
+| Their conversation (texts, voice, replay one) | 3× on their row | Enter |
+| Replay the last voice message | hold on **Replay last voice** | Enter |
+| All conversations | hold on **Conversations** | Enter |
+| Back | 4×, or hold on **Back** | Esc |
+
+While you talk, the screen shows the recording, then the sending progress, and
+returns to the list so you can replay or leave straight away.
+
+**Pending, sending, sent.** While a message of yours is not yet on the air, a
+floating pill says so on every screen: "pending: voice to Base · airtime in
+0:42" while it waits for airtime, then "sending voice to Base · 3/20". A
+message waits up to 10 minutes for airtime; it is never thrown away for it.
+Only one that could not go out within that time is refused, with how long to
+wait.
+
+**Airtime and voice quality.** A radio may transmit only part of each hour.
+For EU 868 that is the legal 1% (36 seconds). For AU915 and US915, which have
+no such hourly cap, RadioConnect uses 10%. Voice quality follows the air
+rate: Codec2 3200 at 9.6k, 1600 at the 2.4k AU915 setup, so sending takes
+about as long as speaking. At 3200 over 2.4k, sending took 1.6 times longer
+than speaking, which is why long messages ran out of airtime and the Orange
+Pi seemed slow. Both can be changed: **Settings → Voice quality**, and
+`duty_cycle_percent` in `config.yaml`.
+
+**Did it arrive?** Each radio's row and each bubble in a conversation shows
+what happened to your last message: **✓** sent on the air, **✓✓** the other
+radio confirmed it arrived (a message also pops up: "✓✓ Base got your 3s
+voice"), **✓ not confirmed** after a minute without that confirmation,
+**not sent** if it never went out. Messages to *Everyone* are not confirmed:
+every radio answering at once would collide. Old WalkieTalkie radios never
+confirm.
+
+## Pairing and unpairing
+
+**Home → Pair devices** on both radios, then hold on the other radio's name
+on one of them and accept the code on the other. If the answer is lost on the
+air, the asking radio asks again and gets it, without a second question.
+
+**Settings → Paired radios** lists them. Hold on one to unpair it, then confirm.
+That removes its keys, contact and name in every radio app on this device. Its
+past messages stay in Chats' history. Unpair on the other radio too, or it will
+keep sending messages this one can no longer read.
 
 ## Chats
 
@@ -24,7 +78,7 @@ texts and voice messages as bubbles, oldest at the top:
 | Send a voice message to this radio | hold, talk, release | hold Space |
 | Write a text | — | type; Enter sends, Esc cancels, Backspace erases |
 | Quick reply ("OK", "On my way", "Need help", …) | 3× | Enter on **Reply** |
-| Play a voice message | select it, then 3× | select it, then Enter |
+| Play a voice message (received ones show who sent them) | select it, then 3× | select it, then Enter |
 | Move between messages | tap / 2× | Down / Up |
 | Back to Chats | 4× | Esc |
 
@@ -54,8 +108,27 @@ stop at ✓, and so do texts to *Everyone*. A text that could not go out says
    RadioConnect to Home.
 
 **Fruit Store → RadioConnect** updates, rolls back, resets, uninstalls and
-deletes it. Only one radio app can use the radio at a time. Messenger and
+deletes it (also `mfruitctl rollback|reset|uninstall|delete radioconnect`).
+Close RadioConnect first: MFruit OS refuses to install over an app that is
+open. Only one radio app can use the radio at a time. Messenger and
 WalkieTalkie can stay installed, but quit one before opening another.
+
+RadioConnect needs nothing from them: the radio setup, the shared radio
+identity and the SDK all come from MFruit OS. On its first start it copies
+WalkieTalkie's messages (if WalkieTalkie was used on this device) into its own
+chats, leaving WalkieTalkie's files untouched, so both old apps can be removed
+afterwards. Messenger's history is not copied: its old Device IDs match no
+contact. After **Reset app**, WalkieTalkie's messages are copied once more if
+they are still on the device.
+
+### Two radios that do not hear each other
+
+Both radios must use the same frequency and air rate. **Pair** shows them
+(for example `920 MHz · 2.4k air`), and so do Home and **Status**. "Radio not
+set up" means MFruit OS's radio setup has not run on that device. It is then
+using `config.yaml`'s 868 MHz at 9.6k, and a radio that was set up will not
+hear it. Run the setup on that device too. Pairing then works across
+privacy channels, and messages need the same channel on both.
 
 ## What it shares with the other radio apps
 
@@ -76,6 +149,18 @@ release** open · **4×** back. On talk screens, holding the button (or Space)
 talks while held, and **3×** opens the selected row. Esc is back and Enter
 opens. The full table, per screen, is in the
 [WalkieTalkie reference](docs/walkietalkie-reference.md#using-it).
+
+## Releasing
+
+```bash
+# set "version" in manifest.json, then:
+tools/build-release.sh          # dist/radioconnect-<version>.tar.gz + SHA256SUMS
+gh release create v<version> dist/radioconnect-<version>.tar.gz dist/SHA256SUMS
+```
+
+The tag must be the manifest version. The Fruit Store then offers it as an
+update, verifies the checksum, and keeps the previous version for Roll back.
+A failed smoke test (`test.sh`) keeps the version that was installed.
 
 ## Development
 

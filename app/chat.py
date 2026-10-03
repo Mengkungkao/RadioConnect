@@ -39,6 +39,7 @@ class ChatController:
     def __init__(self, app):
         self.app = app
         self.compose: str | None = None       # the text being typed, if any
+        self._early = set()   # message numbers sent before they were recorded
 
     # --- what the screens show --------------------------------------------
     @property
@@ -193,19 +194,31 @@ class ChatController:
             self.state.flash(f"pair with {name} first", 3.0)
             return False
         self.inbox.set_status(item, store.SENDING, msg_id)
+        self.track_outgoing(item)
         log.info("text %d to %s queued (%d bytes)", msg_id, name, len(text.encode("utf-8")))
         self.state.chat_index = len(self.inbox.thread(address))   # keep Reply selected
         self.refresh()
         return True
 
+    def acknowledge(self, message):
+        """Tell the sender a text or voice message for us arrived. Broadcasts
+        are not acknowledged: every radio answering at once would collide."""
+        if message.dst != self.app.settings.radio.address or self.app.link is None:
+            return
+        try:
+            self.app.link.send_ack(message.src, message.msg_id)
+        except NotPaired:
+            log.debug("no keys to acknowledge %d", message.src)
+
+    def on_voice(self, message, item):
+        """A voice message arrived (already in the inbox). On the receive thread."""
+        self.acknowledge(message)
+        self.refresh()
+
     def on_text(self, message, item):
         """A text arrived (already in the inbox). On the receive thread."""
-        if message.dst == self.app.settings.radio.address and message.complete \
-                and self.app.link is not None:
-            try:
-                self.app.link.send_ack(message.src, message.msg_id)
-            except NotPaired:
-                log.debug("no keys to acknowledge %d", message.src)
+        if message.complete:
+            self.acknowledge(message)
         peer = self.state.chat_peer
         thread = protocol.BROADCAST if message.dst == protocol.BROADCAST else message.src
         if peer is not None and peer[0] == thread and self.state.screen == CHAT:
@@ -215,21 +228,42 @@ class ChatController:
         self.refresh()
 
     def on_ack(self, message):
+        """The other radio confirmed a message arrived: say so, then tick it."""
         if not message.body:
             return
-        if self.inbox.delivered(message.src, message.body[0]) is not None:
-            self.refresh()
+        item = self.inbox.delivered(message.src, message.body[0])
+        if item is None:
+            return
+        what = "message" if item.kind == "text" else f"{item.duration:.0f}s voice"
+        self.state.flash(f"✓✓ {item.peer_name or 'they'} got your {what}", 4.0)
+        self.refresh()
 
     def on_sent(self, label: str, ok: bool):
         kind, _, number = label.partition("/")
-        if kind != "text" or not number.isdigit():
+        if kind not in ("text", "voice") or not number.isdigit():
             return
-        item = next((i for i in self.inbox.items if i.kind == "text" and i.outgoing
-                     and i.msg_id == int(number) and i.status == store.SENDING), None)
+        item = self.inbox.sending(int(number))
         if item is None:
+            if ok:
+                self._early.add(int(number))
             return
-        # A text to everyone stays at SENT: nobody acknowledges a broadcast.
+        self._mark_sent(item, ok)
+
+    def track_outgoing(self, item):
+        """A message just recorded as SENDING; its "sent" may already be in."""
+        if item.msg_id in self._early:
+            self._early.discard(item.msg_id)
+            self._mark_sent(item, True)
+
+    def _mark_sent(self, item, ok: bool):
+        # To everyone it stays at SENT: nobody acknowledges a broadcast.
         self.inbox.set_status(item, store.SENT if ok else store.FAILED)
+        if not ok:
+            self.state.flash(f"not sent to {item.peer_name or 'them'}", 4.0)
+        elif item.dst == protocol.BROADCAST:
+            self.state.flash("✓ sent to everyone", 3.0)
+        else:
+            self.state.flash(f"✓ sent · waiting for {item.peer_name or 'them'}", 4.0)
         self.refresh()
 
     # --- helpers -------------------------------------------------------------------------

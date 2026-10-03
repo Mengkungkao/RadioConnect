@@ -1,7 +1,7 @@
 {
   "id": "radioconnect",
   "name": "RadioConnect",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "LoRa voice, chat and SOS in one app; needs the radio set up",
   "entrypoint": "run.sh",
   "min_os_version": "1.4.0",
@@ -9,7 +9,7 @@
   "exit_gesture": "none",
   "priority": 45,
   "test": "test.sh",
-  "persist": ["config.yaml"],
+  "persist": [],
   "env": {},
   "disable_esc_exit_key": true
 }

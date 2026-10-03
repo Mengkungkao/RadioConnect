@@ -99,7 +99,8 @@ def play(app, *names):
 def test_settings_lists_every_promised_entry(app):
     app._open_settings()
     keys = [item["key"] for item in app.state.settings_items]
-    assert keys == ["name", "device_id", "channel", "voice", "base", "clock", "reset", "back"]
+    assert keys == ["name", "device_id", "channel", "voice", "paired", "base", "clock",
+                    "reset", "back"]
     assert app.state.screen == SETTINGS
 
 
@@ -111,7 +112,7 @@ def test_opening_a_setting_enters_an_editor(app):
 def test_every_settings_row_opens_without_error(app):
     app._open_settings()
     for index, item in enumerate(app.state.settings_items):
-        if item["key"] == "back":
+        if item["key"] in ("back", "paired"):     # paired opens a list (test_unpair)
             continue
         app.state.settings_index = index
         app._open_setting()

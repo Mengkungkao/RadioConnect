@@ -60,7 +60,8 @@ class Item:
     dst: int = protocol.BROADCAST
     retrieving: bool = False
     retrieve_tries: int = 0
-    # Sent texts only: SENDING, SENT (on the air), DELIVERED (acknowledged).
+    # What we sent (text or voice): SENDING, SENT (on the air), DELIVERED
+    # (the other radio acknowledged it), FAILED (never went out).
     status: str = ""
 
     @property
@@ -155,19 +156,19 @@ class Inbox:
             item.msg_id = msg_id
         self.save()
 
-    def sent_text(self, msg_id: int, dst: int | None = None):
-        """The newest text we sent under ``msg_id`` (to ``dst``), or None."""
-        return next((i for i in self.items if i.kind == "text" and i.outgoing
-                     and i.msg_id == msg_id and (dst is None or i.dst == dst)), None)
+    def sending(self, msg_id: int):
+        """The newest message we sent under ``msg_id`` still going out, or None."""
+        return next((i for i in self.items if i.outgoing and i.msg_id == msg_id
+                     and i.status == SENDING), None)
 
     def delivered(self, src: int, msg_id: int):
-        """``src`` acknowledged our text ``msg_id``. Returns the item, if any.
+        """``src`` acknowledged our message ``msg_id`` (text or voice).
+        Returns the item, if any.
 
         Message numbers wrap at 256, so only one still waiting counts.
         """
-        item = next((i for i in self.items if i.kind == "text" and i.outgoing
-                     and i.dst == src and i.msg_id == msg_id
-                     and i.status in (SENDING, SENT)), None)
+        item = next((i for i in self.items if i.outgoing and i.dst == src
+                     and i.msg_id == msg_id and i.status in (SENDING, SENT)), None)
         if item is not None:
             self.set_status(item, DELIVERED)
         return item
@@ -197,7 +198,8 @@ class Inbox:
         return changed
 
     def add_voice(self, message, peer_name: str, duration: float,
-                  outgoing: bool = False, store_audio: bool = True) -> Item:
+                  outgoing: bool = False, store_audio: bool = True,
+                  status: str = "") -> Item:
         """Keep a voice message, received or sent.
 
         What we send is kept as well as what we receive: it is the copy
@@ -219,7 +221,8 @@ class Inbox:
             incomplete=not message.complete, outgoing=outgoing,
             msg_id=message.msg_id, total=message.total,
             fragment_size=message.fragment_size or protocol.VOICE_CHUNK,
-            missing=list(message.missing), dst=message.dst,
+            missing=list(message.missing), dst=message.dst, status=status,
+            played=outgoing,
         )
         return self._append(item)
 

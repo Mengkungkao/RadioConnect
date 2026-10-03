@@ -220,7 +220,8 @@ def test_acceptance_saves_the_contact_and_its_keys(radio, jarvis, tmp_path):
     assert radio.keyring.peer_broadcast(JARVIS) == jarvis.broadcast_key
     assert radio.keyring.peer_public(JARVIS) == jarvis.public
     assert ("linked", JARVIS) in radio.link.sent
-    assert radio.state.screen == CONTACTS
+    assert radio.state.screen == START, "lands on Talk"
+    assert radio._target == (JARVIS, "jarvis"), "with the new radio chosen"
     assert radio.roster.selected().address == JARVIS
     assert "paired" in radio.state.active_banner
 
@@ -230,7 +231,6 @@ def test_after_pairing_back_leads_home_not_into_pairing(radio, jarvis):
     beacon(radio, jarvis)
     radio._pair_selected()
     answer_yes(radio, jarvis)
-    radio._go_back()
     assert radio.state.screen == START
     radio._go_back()
     assert radio.state.screen == HOME
@@ -308,7 +308,7 @@ def test_accepting_saves_the_keys_and_answers_with_ours(radio, jarvis):
     assert dst == JARVIS
     assert jarvis.open_pair_body(body, ME, JARVIS)[1] == radio.keyring.broadcast_key
     assert JARVIS in contacts(radio)
-    assert radio.state.screen == CONTACTS
+    assert radio.state.screen == START
 
 
 def test_refusing_goes_back_to_pairing(radio, jarvis):
@@ -463,14 +463,14 @@ def pair_over_the_air(mengpi, jarvis):
     jarvis._prompt_pending_pair()
     play(jarvis, TAP, HOLD)
     # The answer is handled on MengPi's receive thread; wait for all of it.
-    assert eventually(lambda: mengpi.state.screen == CONTACTS)
+    assert eventually(lambda: mengpi.state.screen == START and 2 in contacts(mengpi))
 
 
 def test_two_radios_pair_over_the_air(two_radios):
     mengpi, jarvis = two_radios
     pair_over_the_air(mengpi, jarvis)
     assert 2 in contacts(mengpi) and 1 in contacts(jarvis)
-    assert jarvis.state.screen == CONTACTS
+    assert jarvis.state.screen == START
     assert mengpi.link.link_state(2) == protocol.LINK_LINKED
     assert jarvis.link.link_state(1) == protocol.LINK_LINKED
     assert mengpi.keyring.pairwise(2) == jarvis.keyring.pairwise(1)
@@ -535,3 +535,57 @@ def test_radios_paired_here_and_there_are_shared_both_ways(radio):
     radio._merge_shared_contacts()
     assert shared_radio.shared_contacts() == {JARVIS: "jarvis", 4444: "Valley"}
     assert 4444 in contacts(radio)
+
+
+
+# --- a lost answer (found between the Pi and the Orange Pi, 2026-10-03) -----------
+def test_a_lost_answer_is_asked_for_again_and_answered_without_asking_twice(
+        two_radios, monkeypatch):
+    """The Orange Pi accepted, its one PAIR_ACCEPT was lost while the Pi was
+    beaconing, and the Pi's repeated request was ignored: paired on one side
+    only, so the Orange Pi's messages never reached the Pi."""
+    monkeypatch.setattr("app.main.PAIR_REQUEST_RETRY_SECONDS", 0.2)
+    mengpi, jarvis = two_radios
+    real_send = jarvis.link.send_pairing
+    dropped = []
+
+    def lossy(type_, dst, body):
+        if type_ == protocol.PAIR_ACCEPT and not dropped:
+            dropped.append(dst)            # the first answer never arrives
+            return None
+        return real_send(type_, dst, body)
+    jarvis.link.send_pairing = lossy
+
+    for radio in (mengpi, jarvis):
+        open_pairing(radio)
+        radio._pairing_tick()
+    assert eventually(lambda: mengpi.state.pair_found and jarvis.state.pair_found)
+    mengpi._pair_selected()
+    assert eventually(lambda: jarvis._pending_pair is not None)
+    jarvis._prompt_pending_pair()
+    play(jarvis, TAP, HOLD)                 # accepted: jarvis has MengPi now
+    assert dropped == [1] and 1 in contacts(jarvis)
+
+    def retried():
+        mengpi._pairing_tick()              # what MengPi's main loop does
+        return 2 in contacts(mengpi)
+    assert eventually(retried), "MengPi asked again and got the answer"
+    assert jarvis._pending_pair is None, "jarvis was not asked a second time"
+    assert mengpi.keyring.peer_public(2) == jarvis.keyring.public
+
+
+def test_no_beacons_while_waiting_for_an_answer(radio, jarvis):
+    open_pairing(radio)
+    beacon(radio, jarvis)
+    radio._pair_selected()
+    radio.link.sent.clear()
+    radio._pair_beacon_due = 0.0
+    radio._pair_request_due = 0.0
+    radio._pairing_tick()
+    assert radio.link.sent != ["pair"] and "pair" not in radio.link.sent
+    assert [entry[0] for entry in radio.link.of_type("pair-request")] == ["pair-request"]
+
+
+def test_a_repeat_from_a_radio_never_paired_with_needs_the_window(radio, jarvis):
+    request(radio, jarvis)                  # not pairing: ignored as before
+    assert radio._pending_pair is None and radio.link.of_type("pair-accept") == []

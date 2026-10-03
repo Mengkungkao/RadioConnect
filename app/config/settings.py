@@ -34,9 +34,15 @@ class RadioSettings:
     # Must match what the module was provisioned with (MFruit OS's setup-radio.sh
     # writes both): pacing and the duty-cycle budget are worked out from it.
     air_speed: int = 9600
+    # True once MFruit OS's radio setup has recorded what the module holds
+    # (shared/radio/radio.json); until then frequency and air rate are only
+    # this file's guesses, and a radio set up elsewhere will not hear this one.
+    provisioned: bool = False
     power_dbm: int = 22
     uart_baud: int = 9600
-    duty_cycle_percent: float = 1.0
+    # "auto": the band's rule once MFruit OS's radio setup recorded it (see
+    # radio_defaults); a number overrides it.
+    duty_cycle_percent: float | str = "auto"
     # Paired radios ping each other this often, to show which are in range
     # (about 0.16 s of airtime each at 9.6k). 0 turns it off.
     link_check_seconds: float = 120.0
@@ -76,7 +82,9 @@ class AudioSettings:
     mic_level: int | None = 80
     # Codec2 mode: 3200 is the clearest, 700C packs the most messages into
     # the hour's airtime. Settings > Voice quality changes it on the device.
-    codec_mode: str = "3200"
+    # "auto": as clear as the air rate carries without falling behind (see
+    # radio_defaults); Settings > Voice quality overrides it.
+    codec_mode: str = "auto"
     max_record_seconds: float = 20.0
     cues: bool = True
 
@@ -156,6 +164,37 @@ def _coerce(target, values: dict):
             log.warning("ignoring unknown setting %s.%s", type(target).__name__, key)
             continue
         setattr(target, key, value)
+
+
+# Duty cycle by band. EU 868 is legally capped at 1% (ETSI EN 300 220).
+# AU915 and US915 have no such per-hour cap; 10% keeps one radio from
+# holding a shared channel, and config.yaml can change it.
+BAND_DUTY_CYCLE = {"eu868": 1.0, "au915": 10.0, "us915": 10.0}
+DEFAULT_DUTY_CYCLE = 1.0          # band unknown (radio not set up): the strictest
+
+
+def codec_for_air_speed(air_speed: int) -> str:
+    """Codec2 mode that keeps sending about as fast as speaking: 3200 bps
+    voice over a 2.4k air rate takes 1.6 s of air per second spoken."""
+    if air_speed >= 9600:
+        return "3200"
+    return "1600" if air_speed >= 2400 else "700C"
+
+
+def radio_defaults(settings, band: str | None = None):
+    """Resolve "auto" duty cycle and codec from the band and air rate."""
+    radio, audio = settings.radio, settings.audio
+    if _auto(radio.duty_cycle_percent):
+        radio.duty_cycle_percent = BAND_DUTY_CYCLE.get(band or "", DEFAULT_DUTY_CYCLE)
+    else:
+        try:
+            radio.duty_cycle_percent = float(radio.duty_cycle_percent)
+        except (TypeError, ValueError):
+            log.warning("radio.duty_cycle_percent %r is not a number; using the band's",
+                        radio.duty_cycle_percent)
+            radio.duty_cycle_percent = BAND_DUTY_CYCLE.get(band or "", DEFAULT_DUTY_CYCLE)
+    if _auto(audio.codec_mode):
+        audio.codec_mode = codec_for_air_speed(int(radio.air_speed))
 
 
 def _auto(value) -> bool:

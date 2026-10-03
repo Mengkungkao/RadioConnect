@@ -34,7 +34,8 @@ def test_lists_step_with_tap_and_two_clicks(screen):
 @pytest.mark.parametrize("screen", [s for s in LISTS if not nav.can_talk(s)])
 def test_a_hold_opens_the_row_in_a_menu(screen):
     assert nav.route(screen, SELECT) in (nav.OPEN_ITEM, nav.OPEN_SETTING,
-                                         nav.PAIR_SELECTED, nav.PLAY_SELECTED)
+                                         nav.PAIR_SELECTED, nav.PLAY_SELECTED,
+                                         nav.UNPAIR_SELECTED)
 
 
 @pytest.mark.parametrize("screen", [s for s in LISTS if nav.can_talk(s)])
@@ -158,8 +159,10 @@ def test_empty_inbox_armed_hold_says_back():
     assert nav.hints(INBOX, inbox_empty=True, armed=True) == [("release", "to back")]
 
 
-def test_only_start_the_paired_list_talk_and_range_talk_on_a_hold():
-    assert {s for s in ALL_SCREENS if nav.can_talk(s)} == {START, CONTACTS, TALK, RANGE}
+def test_only_talk_screens_talk_on_a_hold():
+    # Paired radios is for unpairing now; talking to a radio is on Talk.
+    assert {s for s in ALL_SCREENS if nav.can_talk(s)} == {START, TALK, RANGE}
+    assert not nav.can_talk(START, start_row="replay")
 
 
 def test_keyboard_letters_reach_the_three_click_actions():
@@ -173,8 +176,8 @@ def test_every_screen_is_reachable_from_home():
     """Menus open their rows' screens; the app decides which. Model that."""
     opens = {
         (HOME, nav.OPEN_ITEM): (START, INBOX, PAIR, SETTINGS, RANGE, STATUS),
-        (START, nav.OPEN_ITEM): (TALK, CONTACTS),
-        (CONTACTS, nav.OPEN_TALK): (TALK,),
+        (SETTINGS, nav.OPEN_SETTING): (CONTACTS,),
+        (RANGE, nav.GO_BACK): (TALK,),       # a range test's talk screen
         (TALK, nav.OPEN_INBOX): (INBOX,),
     }
     reachable, frontier = {HOME}, [HOME]

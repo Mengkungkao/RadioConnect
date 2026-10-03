@@ -102,9 +102,14 @@ class AirtimeBudget:
 
     def wait_seconds(self, packet_bytes: int) -> float:
         """How long until this packet would fit in the budget. 0 if it fits now."""
+        return self.wait_for(self.estimate(packet_bytes))
+
+    def wait_for(self, need: float) -> float:
+        """How long until ``need`` seconds of airtime fit in the budget."""
         if self.unlimited:
             return 0.0
-        need = self.estimate(packet_bytes)
+        if need > self.limit_seconds:
+            return self.window            # never fits in one hour's budget
         with self._lock:
             now = time.monotonic()
             self._prune(now)

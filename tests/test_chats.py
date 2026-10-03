@@ -236,3 +236,53 @@ def test_hints_match_the_handlers_on_chat_screens(radio):
         for action, (name, _label) in navigation.actions(screen).items():
             assert name in radio._actions or name == navigation.EXIT_APP, (screen, action)
     assert ("hold", "talk") in navigation.hints(CHAT)
+
+
+# --- voice: sent, arrived, or not confirmed -------------------------------------------------
+def voice(src=ME, dst=BASE, msg_id=60):
+    return protocol.Message(type=protocol.VOICE, src=src, msg_id=msg_id, body=b"\0" * 32,
+                            flags=0, missing=[], rssi_dbm=None, received_at=time.time(),
+                            dst=dst, total=1)
+
+
+def test_a_voice_message_is_ticked_sent_then_delivered_with_an_arrival_message(radio):
+    item = radio.inbox.add_voice(voice(), "Base", 3.0, outgoing=True, status=store.SENDING)
+    radio.chat.on_sent("voice/60", True)
+    assert item.status == store.SENT
+    assert "sent · waiting for Base" in radio.state.active_banner
+    radio.chat.on_ack(message(protocol.ACK, body=bytes([60])))
+    assert item.status == store.DELIVERED
+    assert "Base got your 3s voice" in radio.state.active_banner
+
+
+def test_sent_before_it_was_recorded_still_counts(radio):
+    radio.chat.on_sent("voice/61", True)          # the link was quicker than the app
+    item = radio.inbox.add_voice(voice(msg_id=61), "Base", 2.0, outgoing=True,
+                                 status=store.SENDING)
+    radio.chat.track_outgoing(item)
+    assert item.status == store.SENT
+
+
+def test_voice_for_us_is_acknowledged_and_voice_to_everyone_is_not(radio):
+    incoming = voice(src=BASE, dst=ME, msg_id=12)
+    radio.chat.on_voice(incoming, radio.inbox.add_voice(incoming, "Base", 2.0))
+    assert radio.link.acks == [(BASE, 12)]
+    everyone = voice(src=BASE, dst=protocol.BROADCAST, msg_id=13)
+    radio.chat.on_voice(everyone, radio.inbox.add_voice(everyone, "Base", 2.0))
+    assert radio.link.acks == [(BASE, 12)]
+
+
+def test_an_unconfirmed_message_to_one_radio_says_so_after_a_minute(radio):
+    item = radio.inbox.add_voice(voice(), "Base", 3.0, outgoing=True, status=store.SENT)
+    assert screens.tick(item) == "✓"
+    item.received_at -= 61
+    assert screens.tick(item) == "✓ not confirmed"
+    item.dst = protocol.BROADCAST
+    assert screens.tick(item) == "✓", "nobody confirms a broadcast"
+
+
+def test_a_dropped_voice_message_says_not_sent(radio):
+    item = radio.inbox.add_voice(voice(msg_id=62), "Base", 3.0, outgoing=True,
+                                 status=store.SENDING)
+    radio.chat.on_sent("voice/62", False)
+    assert item.status == store.FAILED and "not sent to Base" in radio.state.active_banner

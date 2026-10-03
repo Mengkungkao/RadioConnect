@@ -47,10 +47,12 @@ from app.chat import ChatController
 from app.radio import protocol
 from app.radio import modepins
 from app.config.settings import hostname_callsign
-from app.radio.link import LoraLink, NotPaired
+from app.radio.link import MAX_AIRTIME_WAIT, LoraLink, NotPaired
 from app.radio.linkcheck import DISCONNECTED, IN_RANGE, WEAK, LinkMonitor
 from app.radio.sx126x import PortBusy, SX126x, port_conflicts
 from app.rangetest import RangeTest
+from app.store import legacy_import
+from app.store.inbox import SENDING as SENT_STATUS_SENDING
 from app.store.inbox import Inbox
 from app.store import shared_radio
 from app.store.overrides import Overrides
@@ -91,6 +93,11 @@ PAIR_BEACON_SECONDS = 3.0
 PAIR_WINDOW_SECONDS = 120.0
 # How long to wait for the other operator to accept before saying so.
 PAIR_ANSWER_SECONDS = 30.0
+# A request is one packet; while waiting it goes again this often (the other
+# radio may have been transmitting), and a radio already paired answers a
+# repeat at most this often.
+PAIR_REQUEST_RETRY_SECONDS = 4.0
+PAIR_REANSWER_SECONDS = 2.0
 # At most one reply a radio that is not pairing sends to a clashing one.
 CLASH_REPLY_SECONDS = 10.0
 
@@ -137,6 +144,9 @@ class WalkieApp:
     _pairing_with = None
     _pair_found = None
     _pair_beacon_due = 0.0
+    _pair_request_due = 0.0
+    _unpairing = None             # (address, name) awaiting the confirm
+    _accepts_sent = None          # addr -> when PAIR_ACCEPT was last repeated
     _last_clash_reply = -CLASH_REPLY_SECONDS
     _return_screen = SETTINGS
     _warned_config_mode = False
@@ -156,6 +166,7 @@ class WalkieApp:
         # One Device ID, set of keys and contact list per device, shared with
         # the Messenger: settle the ID before anything shows or uses it.
         self.shared_radio = shared_radio.sync_identity(settings, Overrides(settings.data_dir))
+        settings_module.radio_defaults(settings)   # whatever "auto" is still unresolved
         self.running = True
         self._closing = False
         self._wake = threading.Event()
@@ -171,6 +182,8 @@ class WalkieApp:
             address=settings.radio.address,
             channel=settings.radio.privacy_channel,
             frequency_mhz=settings.radio.frequency_mhz,
+            air_speed=settings.radio.air_speed,
+            radio_setup=bool(getattr(settings.radio, "provisioned", False)),
             max_record_seconds=settings.audio.max_record_seconds,
         )
 
@@ -202,6 +215,10 @@ class WalkieApp:
         self._merge_shared_contacts()
         clock.set_offset(self.overrides.clock_offset)
         self.roster = Roster(settings.contacts, data_dir)
+        try:
+            legacy_import.import_walkietalkie(data_dir)
+        except Exception:
+            log.warning("could not copy WalkieTalkie's messages", exc_info=True)
         self.inbox = Inbox(data_dir)
         self.state.inbox = self.inbox.items
         self.state.unread = self.inbox.unread
@@ -252,6 +269,8 @@ class WalkieApp:
         self._fetch_state()
         self._check_due = time.monotonic() + FIRST_CHECK_SECONDS
         self._open_radio()
+        if not self.state.radio_setup:
+            self.state.flash("radio not set up: run setup-radio", 8.0)
 
         self._playback_lock = threading.Lock()
         self._last_recall = 0.0
@@ -420,7 +439,8 @@ class WalkieApp:
         self._wake.set()
 
     def _can_talk(self) -> bool:
-        return navigation.can_talk(self.state.screen, self.state.back_selected)
+        return navigation.can_talk(self.state.screen, self.state.back_selected,
+                                   self.state.start_row)
 
     def _on_action(self, action):
         """One MFruit OS input action, from the button or a keyboard."""
@@ -457,7 +477,7 @@ class WalkieApp:
         else:
             name = navigation.route(
                 self.state.screen, action.name, inbox_empty=not self.inbox.items,
-                back_selected=self.state.back_selected,
+                back_selected=self.state.back_selected, start_row=self.state.start_row,
             )
         self._dispatch(name)
 
@@ -519,6 +539,7 @@ class WalkieApp:
             navigation.NEXT_REPLY: lambda: self.chat.next_reply(),
             navigation.PREVIOUS_REPLY: lambda: self.chat.next_reply(-1),
             navigation.SEND_REPLY: lambda: self.chat.send_reply(),
+            navigation.UNPAIR_SELECTED: self._unpair_selected,
             navigation.MARK_SPOT: self._mark_spot,
             navigation.PROBE_NOW: self._probe_now,
             navigation.GO_BACK: self._go_back,
@@ -594,15 +615,44 @@ class WalkieApp:
         return f"{len(reachable)} of {len(statuses)} in range"
 
     def _start_items(self) -> list:
-        paired = len([e for e in self.roster.entries()
-                      if e.address not in self.state.unpaired])
-        return [
-            {"key": "all", "label": "To ALL",
-             "value": f"every paired radio on channel {self.state.channel}"},
-            {"key": "device", "label": "To a paired device",
-             "value": f"{paired} paired" if paired else "none yet: pair one first"},
-            {"key": "back", "label": "Back"},
-        ]
+        """Talk's rows: everyone, each paired radio, then replay, chats, back.
+
+        Each radio's row says whether it is in range and what became of the
+        last voice message to it, so "did they get it?" is answered here.
+        """
+        rows = [{"key": "to", "address": protocol.BROADCAST, "label": "Everyone",
+                 "value": self._last_voice_summary(protocol.BROADCAST)
+                 or f"every paired radio on channel {self.state.channel}"}]
+        statuses = self.state.link_status or {}
+        for entry in self.roster.entries():
+            if entry.is_broadcast or entry.address in self.state.unpaired:
+                continue
+            reach = statuses.get(entry.address, ("", ""))[0]
+            detail = [reach or entry.status]
+            last = self._last_voice_summary(entry.address)
+            if last:
+                detail.append(last)
+            rows.append({"key": "to", "address": entry.address, "label": entry.name,
+                         "value": "  ·  ".join(d for d in detail if d)})
+        latest = getattr(self.inbox, "latest_voice", lambda: None)()
+        rows.append({"key": "replay", "label": "Replay last voice",
+                     "value": (f"from {latest.peer_name or latest.src} · "
+                               f"{latest.duration:.0f}s · {latest.when}") if latest
+                     else "nothing received yet"})
+        rows.append({"key": "chats", "label": "Conversations",
+                     "value": self._chats_summary()})
+        rows.append({"key": "back", "label": "Back"})
+        return rows
+
+    def _last_voice_summary(self, address: int) -> str:
+        """"you 3s ✓✓" / "Base 4s new": the last voice to or from ``address``."""
+        thread = self.inbox.thread(address) if hasattr(self.inbox, "thread") else []
+        voice = next((i for i in reversed(thread) if i.kind == "voice"), None)
+        if voice is None:
+            return ""
+        if voice.outgoing:
+            return f"you {voice.duration:.0f}s {screens.tick(voice)}".strip()
+        return f"heard {voice.duration:.0f}s" + ("" if voice.played else " · new")
 
     def _refresh_menus(self):
         self.state.home_items = self._home_items()
@@ -613,22 +663,45 @@ class WalkieApp:
             self.state.home_index = (self.state.home_index + step) % len(self.state.home_items)
         elif self.state.screen == START:
             self.state.start_index = (self.state.start_index + step) % len(self.state.start_items)
+            self._choose_start_target()
+
+    def _choose_start_target(self):
+        """On Talk, the radio under the selection is who a hold talks to."""
+        row = self.state.start_items[self.state.start_index % len(self.state.start_items)]
+        if row["key"] != "to":
+            return
+        address = row["address"]
+        self._target = (address, BROADCAST_NAME if address == protocol.BROADCAST
+                        else row["label"])
+        self._refresh_entries()
+
+    def _open_talk_menu(self):
+        """Home > Talk, with the radio last talked to already selected."""
+        self._refresh_menus()
+        addresses = [row.get("address") for row in self.state.start_items]
+        self.state.start_index = (addresses.index(self._target[0])
+                                  if self._target[0] in addresses else 0)
+        self._choose_start_target()
+        self._show(START)
 
     def _open_item(self):
         if self.state.screen == HOME:
             key = self.state.home_items[self.state.home_index % len(self.state.home_items)]["key"]
-            {"start": lambda: self._show(START), "receive": self._open_inbox,
+            {"start": self._open_talk_menu, "receive": self._open_inbox,
              "chats": lambda: self.chat.open_list(),
              "pair": self._start_pairing, "settings": self._open_settings,
              "status": lambda: self._show(STATUS),
              "range": self._start_range_test, "back": lambda: self.stop("user")}[key]()
         elif self.state.screen == START:
-            key = self.state.start_items[self.state.start_index % len(self.state.start_items)]["key"]
-            if key == "all":
-                self._talk_to(protocol.BROADCAST, BROADCAST_NAME)
-            elif key == "device":
-                self.state.contacts_back = not self.state.entries
-                self._show(CONTACTS)
+            row = self.state.start_items[self.state.start_index % len(self.state.start_items)]
+            if row["key"] == "to":
+                address = row["address"]
+                self.chat.open_thread(address, "Everyone" if address == protocol.BROADCAST
+                                      else row["label"])
+            elif row["key"] == "replay":
+                self._replay_last()
+            elif row["key"] == "chats":
+                self.chat.open_list()
             else:
                 self._go_back()
 
@@ -740,6 +813,8 @@ class WalkieApp:
              "value": f"{self.settings.radio.privacy_channel}  ·  others are ignored"},
             {"key": "voice", "label": "Voice quality",
              "value": self._voice_summary(self.settings.audio.codec_mode)},
+            {"key": "paired", "label": "Paired radios",
+             "value": self._paired_summary()},
             {"key": "base", "label": "Base station", "value": base_name},
             {"key": "clock", "label": "Date & time",
              "value": clock.now().strftime("%Y-%m-%d %H:%M") + "  ·  " + clock.describe()},
@@ -748,6 +823,53 @@ class WalkieApp:
              "destructive": True},
             {"key": "back", "label": "Back"},
         ]
+
+    def _paired_summary(self) -> str:
+        count = len([e for e in self.roster.entries() if not e.is_broadcast])
+        return f"{count} paired  ·  unpair one" if count else "none yet"
+
+    def _open_paired(self):
+        """Settings > Paired radios: the list to unpair from."""
+        self._refresh_entries()
+        self.state.contacts_back = not self.state.entries
+        self._show(CONTACTS)
+
+    def _unpair_selected(self):
+        entry = None if self.state.contacts_back else self.roster.selected()
+        if entry is None:
+            self._go_back()
+            return
+        self._unpairing = (entry.address, entry.name)
+        self._begin_edit(
+            ConfirmEditor(f"Unpair {entry.name}?",
+                          f"ID {entry.address} · its messages can no\nlonger be read, "
+                          f"in every radio\napp. Unpair on {entry.name} too."),
+            "UNPAIR",
+        )
+
+    def _apply_unpair(self):
+        """Forget a paired radio: its keys (shared by every radio app on this
+        device), its contact entry and its name. Its messages stay in Chats'
+        history; talking to it again needs pairing again."""
+        unpairing, self._unpairing = self._unpairing, None
+        if unpairing is None:
+            return
+        address, name = unpairing
+        if self.keyring is not None:
+            self.keyring.remove_peer(address)
+        self.overrides.remove_contact(address)
+        shared_radio.forget_contact(address)
+        self.settings.contacts = [c for c in self.settings.contacts if c.address != address]
+        self.roster = Roster(self.settings.contacts, self.settings.data_dir)
+        if self._target[0] == address:
+            self._target = (protocol.BROADCAST, BROADCAST_NAME)
+        if self.monitor is not None:
+            self.monitor.watch(self._paired_addresses(), time.monotonic())
+        self._refresh_entries()
+        self._refresh_menus()
+        self.state.contacts_back = not self.state.entries
+        self.state.flash(f"unpaired {name}", 4.0)
+        log.info("unpaired %s (%d)", name, address)
 
     def _open_settings(self):
         self._show(SETTINGS)
@@ -767,7 +889,7 @@ class WalkieApp:
         opener = {
             "name": self._edit_name, "device_id": self._edit_device_id,
             "channel": self._edit_channel, "voice": self._edit_voice,
-            "base": self._edit_base,
+            "base": self._edit_base, "paired": self._open_paired,
             "clock": self._edit_clock, "reset": self._edit_reset,
             "back": self._go_back,
         }[key]
@@ -883,6 +1005,8 @@ class WalkieApp:
             self.state.flash("clock set" if how == "system" else "clock set (app only)")
         elif title == "RESET":
             self._apply_reset()
+        elif title == "UNPAIR":
+            self._apply_unpair()
         elif title == "PAIRING":
             self._apply_pair_decision(True)
 
@@ -1039,15 +1163,18 @@ class WalkieApp:
             self._return_screen = then
 
     def _finish_pairing(self, addr: int, name: str):
-        # Land on the paired list, with Back leading out through Start to
-        # Home -- not back into a pairing screen that has closed.
-        self._stop_pairing(CONTACTS)
-        self._parents[CONTACTS] = START
+        # Land on Talk with the new radio chosen, so a hold talks to it, and
+        # Back leading Home -- not back into a pairing screen that has closed.
+        self._stop_pairing(START)
         self._parents[START] = HOME
         self.roster.select_address(addr)
         self.state.contacts_back = False
+        self._target = (addr, name)
         self._refresh_entries()
         self._refresh_menus()
+        addresses = [row.get("address") for row in self.state.start_items]
+        if addr in addresses:
+            self.state.start_index = addresses.index(addr)
         self.state.flash(f"paired with {name}", 4.0)
         log.info("pairing: paired with %s (%d)", name, addr)
         # Start watching it now rather than at the next regular check.
@@ -1083,9 +1210,16 @@ class WalkieApp:
         self._pairing_with = (addr, name, time.monotonic(), public)
         self.state.pair_status = f"code {code} · waiting for {name}"
         log.info("pairing: asking %s (%d), code %s", name, addr, code)
+        self._send_pair_request()
+
+    def _send_pair_request(self):
+        """(Re)send the request: one packet, easily lost while the other
+        radio is itself transmitting, so it is repeated until answered."""
+        addr, _name, _asked, public = self._pairing_with
         body = self.keyring.pair_body(public, self.settings.radio.address, addr,
                                       self.settings.identity.callsign)
         self.link.send_pairing(protocol.PAIR_REQUEST, addr, body)
+        self._pair_request_due = time.monotonic() + PAIR_REQUEST_RETRY_SECONDS
 
     def _on_pair_beacon(self, message, peer):
         """Someone nearby is pairing. On the rx thread."""
@@ -1107,22 +1241,45 @@ class WalkieApp:
     def _on_pair_request(self, message):
         """Another radio asks to pair. On the rx thread.
 
-        Only while pairing: a request that arrives otherwise is ignored,
-        so nobody can make a radio in someone's pocket start asking.
+        A new radio is only listened to while pairing: a request that
+        arrives otherwise is ignored, so nobody can make a radio in
+        someone's pocket start asking. A radio this one already accepted,
+        asking again with the same key, did not hear the answer (the radio
+        is half-duplex: it was sending a beacon): the answer is sent again,
+        without asking the person a second time. That is what left the Pi
+        paired on one side only (2026-10-03).
         """
-        if not self._pairing or self._pending_pair is not None:
+        if self._pending_pair is not None or self.keyring is None:
             return
         opened = self.keyring.open_pair_body(message.body, message.src,
                                              self.settings.radio.address)
         if opened is None:
-            log.warning("pairing: an unreadable request from %d", message.src)
+            if self._pairing:
+                log.warning("pairing: an unreadable request from %d", message.src)
             return
         public, broadcast, name = opened
+        if self.keyring.peer_public(message.src) == public:
+            self._answer_again(message.src, public, name or f"node {message.src}")
+            return
+        if not self._pairing:
+            return
         name = name or f"node {message.src}"
         code = self.keyring.code_with(public)
         self._pending_pair = (message.src, name, public, broadcast, code)
         log.info("pairing: %s (%d) asks to pair, code %s", name, message.src, code)
         self._wake.set()
+
+    def _answer_again(self, addr: int, public: bytes, name: str):
+        """Repeat PAIR_ACCEPT to a radio already paired with this key."""
+        now = time.monotonic()
+        last = (self._accepts_sent or {}).get(addr, -PAIR_REANSWER_SECONDS)
+        if now - last < PAIR_REANSWER_SECONDS or self.link is None:
+            return
+        self._accepts_sent = {**(self._accepts_sent or {}), addr: now}
+        body = self.keyring.pair_body(public, self.settings.radio.address, addr,
+                                      self.settings.identity.callsign)
+        self.link.send_pairing(protocol.PAIR_ACCEPT, addr, body)
+        log.info("pairing: %s (%d) asked again; answered again", name, addr)
 
     def _prompt_pending_pair(self):
         """Show the accept/refuse prompt, once there is a moment to."""
@@ -1222,6 +1379,12 @@ class WalkieApp:
         if self._pairing_with and now - self._pairing_with[2] >= PAIR_ANSWER_SECONDS:
             self.state.pair_status = f"no answer from {self._pairing_with[1]}"
             self._pairing_with = None
+        if self._pairing_with and self.link is not None:
+            # Waiting for an answer: ask again now and then, and keep quiet
+            # otherwise -- a beacon on the air is when this radio is deaf to it.
+            if now >= self._pair_request_due:
+                self._send_pair_request()
+            return
         if now >= self._pair_beacon_due and self.link is not None:
             self.link.send_pair()
             self._pair_beacon_due = now + PAIR_BEACON_SECONDS
@@ -1230,6 +1393,7 @@ class WalkieApp:
         deadlines = [self._pair_beacon_due, self._pairing_until]
         if self._pairing_with:
             deadlines.append(self._pairing_with[2] + PAIR_ANSWER_SECONDS)
+            deadlines.append(self._pair_request_due)
         return max(0.05, min(deadlines) - time.monotonic())
 
     def _apply_reset(self):
@@ -1645,7 +1809,8 @@ class WalkieApp:
             return
         if not self._can_talk():
             self.state.flash("listening only here" if self.state.screen == INBOX
-                             else "to talk: Home > Start")
+                             else "move to a radio to talk" if self.state.screen == START
+                             else "to talk: Home > Talk")
             self._wake.set()
             return
         if self.link is None:
@@ -1661,6 +1826,8 @@ class WalkieApp:
         if not self._can_reach(addr, name):
             self._wake.set()
             return
+        self._call(addr)                       # what choosing it on Start used to do
+        self._check_before_talking(addr)
 
         self.player.stop()  # duck any playback so we do not record it
         if not self.recorder.start():
@@ -1668,9 +1835,10 @@ class WalkieApp:
             self._wake.set()
             return
 
-        if self.state.screen != RANGE:
+        if self.state.screen not in (RANGE, START, CHAT):
             # The range test shows its own progress, and leaving it would
-            # end the test.
+            # end the test. Talk and a conversation draw the talking disc in
+            # place, so you are back on the list, ready to replay or leave.
             self._show(TALK)
         self.state.radio_state = RECORDING
         self.display.set_led(theme.LED_REC)
@@ -1727,11 +1895,18 @@ class WalkieApp:
         )
 
         airtime = self.link.budget.estimate_message(on_air)
-        if self.link.budget.remaining_seconds() < airtime:
-            self.state.flash("duty cycle full", 4.0)
+        wait = self.link.budget.wait_for(airtime)
+        if wait > MAX_AIRTIME_WAIT:
+            # It would wait too long (or can never fit this hour): say how long.
+            minutes = max(1, round(wait / 60))
+            self.state.flash(f"airtime full: try again in {minutes} min", 5.0)
             self.player.cue(self.cues.error)
             self._wake.set()
             return
+        if wait > 0:
+            # It goes as soon as the hour's airtime allows: the "pending" pill
+            # counts down, and the message is never thrown away for it.
+            self.state.flash(f"pending: airtime frees in {wait:.0f} s", 4.0)
 
         self.state.radio_state = SENDING
         self.state.tx_sent, self.state.tx_total = 0, packets
@@ -1755,7 +1930,10 @@ class WalkieApp:
             received_at=time.time(), dst=dst, total=total,
             fragment_size=protocol.VOICE_CHUNK,
         )
-        self.inbox.add_voice(sent, target_name, duration, outgoing=True)
+        item = self.inbox.add_voice(sent, target_name, duration, outgoing=True,
+                                    status=SENT_STATUS_SENDING)
+        if self.chat is not None:
+            self.chat.track_outgoing(item)
         self.state.inbox = self.inbox.items
 
     # --- receiving ------------------------------------------------------
@@ -1820,6 +1998,8 @@ class WalkieApp:
             message = self._silence_gaps(message)
             duration = self._voice_duration(message)
             item = self.inbox.add_voice(message, name, duration)
+            if self.chat is not None:
+                self.chat.on_voice(message, item)
             self.state.flash(f"{name} · {duration:.0f}s voice"
                              + (" · gaps" if message.missing else ""))
             if self.range_test is not None:
@@ -1955,14 +2135,34 @@ class WalkieApp:
             self.display.set_led(theme.LED_IDLE)
             if self.settings.audio.cues:
                 self.player.cue(self.cues.tx_done)
-            self.state.flash("sent")
+            # The chat controller says "sent · waiting for …" once the link
+            # reports the whole message out (app.chat on_sent).
         self._wake.set()
 
     # --- main loop -------------------------------------------------------
+    def _outbox_text(self) -> str:
+        """The floating "pending" pill: a message of yours not yet on the air."""
+        link = self.link
+        tx = getattr(link, "sending", None) if link is not None else None
+        queued = link.pending() if link is not None else 0
+        now = time.monotonic()
+        if tx is not None and tx.kind in ("voice", "text"):
+            who = "everyone" if tx.dst == protocol.BROADCAST else self._name_of(tx.dst)
+            if tx.waiting_until > now:
+                left = int(tx.waiting_until - now + 0.999)
+                return f"pending: {tx.kind} to {who} · airtime in {left // 60}:{left % 60:02d}"
+            return f"sending {tx.kind} to {who} · {tx.sent}/{tx.total}"
+        if queued and tx is not None and tx.waiting_until > now:
+            return f"pending: {queued} waiting for airtime"
+        return ""
+
     def _sync_state(self):
         self.state.wifi_level = self.status.sample().wifi_level
+        self.state.outbox = self._outbox_text()
         if self.chat is not None and self.state.screen in (CHATS, CHAT):
             self.chat.refresh()       # voice sent or played changes the bubbles
+        if self.state.screen == START:
+            self.state.start_items = self._start_items()   # ticks and reach move on
         if self.recorder.recording:
             self.state.record_level = self.recorder.level
             self.state.record_seconds = self.recorder.elapsed
@@ -2084,6 +2284,8 @@ class WalkieApp:
             # Nothing to draw and nothing to poll: wake on the packet.
             return None
         deadlines = [self.display.next_idle_deadline()]
+        if self.state.outbox:
+            deadlines.append(1.0)         # the pending pill counts down
         if self.state.active_banner:
             deadlines.append(max(0.05, self.state.banner_until - time.monotonic()))
         if self.link is not None and self.link.reassembling:

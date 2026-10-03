@@ -51,6 +51,7 @@ OPEN_SETTING = "open_setting"
 NEXT_FOUND = "next_found"
 PREVIOUS_FOUND = "previous_found"
 PAIR_SELECTED = "pair_selected"
+UNPAIR_SELECTED = "unpair_selected"   # Paired radios: forget the selected one
 NEXT_CHAT = "next_chat"          # Chats: the list of conversations
 PREVIOUS_CHAT = "previous_chat"
 OPEN_CHAT = "open_chat"
@@ -87,18 +88,22 @@ SCREEN_ACTIONS = {
         SELECT: (OPEN_ITEM, "open"),
         BACK: (EXIT_APP, "exit"),
     },
+    # Talk: Everyone and each paired radio, then Replay, Conversations and
+    # Back. On a radio's row a hold talks to it at once (moving there chose
+    # it); 3x or Enter opens its conversation. On the other rows a hold
+    # opens the row, as in any menu (``start_row``).
     START: {
         NEXT: (NEXT_ITEM, "next"),
         PREVIOUS: (PREVIOUS_ITEM, "previous"),
-        SELECT: (OPEN_ITEM, "open"),
-        EXTRA: (OPEN_ITEM, "open"),
+        SELECT: (OPEN_ITEM, "chat"),
+        EXTRA: (OPEN_ITEM, "chat"),
         BACK: (GO_BACK, "back"),
     },
+    # Settings > Paired radios: pick one to unpair (talking is on Talk).
     CONTACTS: {
         NEXT: (NEXT_CONTACT, "next"),
         PREVIOUS: (PREVIOUS_CONTACT, "previous"),
-        SELECT: (OPEN_TALK, "talk to"),
-        EXTRA: (OPEN_TALK, "talk to"),
+        SELECT: (UNPAIR_SELECTED, "unpair"),
         BACK: (GO_BACK, "back"),
     },
     TALK: {
@@ -179,15 +184,21 @@ CHAR_ACTIONS = {
 # the selected row. Menus are for choosing, and a hold that transmitted
 # while you were looking for a setting went out to whoever was last
 # chosen, unasked. Receive is for listening back to what came in.
-TALK_SCREENS = frozenset({START, CONTACTS, TALK, RANGE, CHAT})
+TALK_SCREENS = frozenset({START, TALK, RANGE, CHAT})
 
 
-def can_talk(screen: str, back_selected: bool = False) -> bool:
+# Talk's rows that are not a radio, and what a hold does there.
+START_ROW_LABELS = {"replay": "replay", "chats": "open", "back": "back"}
+
+
+def can_talk(screen: str, back_selected: bool = False, start_row: str = "to") -> bool:
+    if screen == START and start_row != "to":
+        return False
     return screen in TALK_SCREENS and not back_selected
 
 
 def actions(screen: str, inbox_empty: bool = False,
-            back_selected: bool = False) -> dict:
+            back_selected: bool = False, start_row: str = "to") -> dict:
     """The action -> (what it does, label) map in force for this screen.
 
     EDIT is absent on purpose: a modal editor routes input to itself
@@ -196,6 +207,9 @@ def actions(screen: str, inbox_empty: bool = False,
     if screen == EDIT:
         return {}
     table = dict(SCREEN_ACTIONS.get(screen, SCREEN_ACTIONS[HOME]))
+    if screen == START and start_row in ("replay", "chats"):
+        label = START_ROW_LABELS[start_row]
+        table[SELECT] = table[EXTRA] = (OPEN_ITEM, label)
     if back_selected or (screen == INBOX and inbox_empty):
         # Back is an ordinary selectable row. Taps only move through the
         # list, including an empty inbox whose sole row is Back. A partial
@@ -206,9 +220,9 @@ def actions(screen: str, inbox_empty: bool = False,
 
 
 def route(screen: str, action: str, inbox_empty: bool = False,
-          back_selected: bool = False):
+          back_selected: bool = False, start_row: str = "to"):
     """What an input action does here, or None if it does nothing."""
-    entry = actions(screen, inbox_empty, back_selected).get(action)
+    entry = actions(screen, inbox_empty, back_selected, start_row).get(action)
     return entry[0] if entry else None
 
 
@@ -221,17 +235,17 @@ _GESTURE = {NEXT: "tap", PREVIOUS: "2×", SELECT: "hold", EXTRA: "3×", BACK: "4
 
 
 def hints(screen: str, inbox_empty: bool = False, armed: bool = False,
-          back_selected: bool = False) -> list:
+          back_selected: bool = False, start_row: str = "to") -> list:
     """Footer hints, [(gesture, label)], from the same table as `route`.
 
     Most important first, because the footer drops what does not fit
     from the end: on a talk screen "hold talk" leads; the way back is
     always within the first three.
     """
-    table = actions(screen, inbox_empty, back_selected)
+    table = actions(screen, inbox_empty, back_selected, start_row)
     if armed and SELECT in table:
         return [("release", f"to {table[SELECT][1]}")]
-    talk = can_talk(screen, back_selected)
+    talk = can_talk(screen, back_selected, start_row)
     order = [SELECT, NEXT, EXTRA, BACK, PREVIOUS] if talk else [NEXT, SELECT, BACK, EXTRA, PREVIOUS]
     shown, labels = [], set()
     for action in order:

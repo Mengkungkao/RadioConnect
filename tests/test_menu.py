@@ -1,7 +1,8 @@
 """The menu the app opens on, and the way back out of everything.
 
-    Home   Start  > To ALL             -> Talk to everyone paired
-                  > To a paired device -> the paired list -> Talk
+    Home   Talk   > Everyone, each paired radio: moving there chooses it,
+                    a hold talks to it, 3x opens its conversation
+                  > Replay last voice, Conversations, Back
            Receive                     -> what has come in
            Pair devices                -> see test_pairing
            Settings                    -> name, ID, privacy channel ...
@@ -18,11 +19,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.chat import ChatController
 from app.config.settings import Contact
 from app.radio import protocol
+from app.store.inbox import Inbox
 from app.store.keyring import Keyring
 from app.store.roster import Roster
-from app.ui.screens import CONTACTS, HOME, INBOX, SETTINGS, START, STATUS, TALK
+from app.ui.screens import CHAT, CHATS, HOME, INBOX, SETTINGS, START, STATUS
 from tests.test_pairing import FakeLink
 from tests.test_settings_flow import HOLD, QUAD, TAP, THRICE, TWICE, act, app  # noqa: F401
 
@@ -41,6 +44,9 @@ def radio(app, tmp_path):
         addr == protocol.BROADCAST or app.keyring.is_paired(addr))
     app.board = SimpleNamespace(foreground_ready=True)
     app._parents = {}
+    app.inbox = Inbox(tmp_path)
+    app.chat = ChatController(app)
+    app.state.replies = app.chat.reply_items()
     app._refresh_entries()
     app._refresh_menus()
     return app
@@ -68,51 +74,63 @@ def test_the_app_opens_on_home(radio):
         ["start", "chats", "receive", "pair", "settings", "status", "range", "back"]
 
 
-def test_start_offers_all_and_a_paired_device(radio):
+def keys_on_talk(radio):
+    return [(row["key"], row.get("address")) for row in radio.state.start_items]
+
+
+def test_talk_lists_everyone_and_each_paired_radio_then_replay_chats_back(radio):
     go_to(radio, "start")
     assert radio.state.screen == START
-    assert [i["key"] for i in radio.state.start_items] == ["all", "device", "back"]
+    # Hilltop has no keys, so it is not offered: pairing comes first.
+    assert keys_on_talk(radio) == [("to", protocol.BROADCAST), ("to", 1),
+                                   ("replay", None), ("chats", None), ("back", None)]
 
 
-def test_to_all_opens_talk_on_everyone(radio):
+def test_moving_to_a_radio_chooses_it_without_opening_anything(radio):
     go_to(radio, "start")
-    go_to(radio, "all")
-    assert radio.state.screen == TALK
-    assert radio.state.target_address == protocol.BROADCAST
     assert radio._target[0] == protocol.BROADCAST
+    press(radio, TAP)                          # to Base
+    assert radio.state.screen == START
+    assert radio._target == (1, "Base")
+    assert radio.state.target_name == "Base"
+    assert radio._can_talk()
+
+
+def test_talk_reopens_on_the_radio_last_talked_to(radio):
+    go_to(radio, "start")
+    press(radio, TAP, QUAD)                    # Base, then back to Home
+    go_to(radio, "start")
+    assert radio.state.start_row == "to" and radio._target == (1, "Base")
+    assert radio.state.start_items[radio.state.start_index]["address"] == 1
+
+
+def test_three_clicks_on_a_radio_open_its_conversation(radio):
+    go_to(radio, "start")
+    press(radio, TAP, THRICE)
+    assert radio.state.screen == CHAT and radio.state.chat_peer == (1, "Base")
+    press(radio, QUAD)
+    assert radio.state.screen == START, "back returns to Talk"
+
+
+def test_replay_conversations_and_back_rows_open_with_a_hold(radio):
+    go_to(radio, "start")
+    press(radio, TAP, TAP)                     # from Everyone: Base, then Replay
+    assert radio.state.start_row == "replay" and not radio._can_talk()
+    press(radio, HOLD)
+    assert "no voice yet" in radio.state.active_banner
+    press(radio, TAP, HOLD)                    # Conversations
+    assert radio.state.screen == CHATS
+    press(radio, QUAD)
+    press(radio, TAP, HOLD)                    # Back
+    assert radio.state.screen == HOME
 
 
 def test_back_retraces_the_way_in(radio):
     go_to(radio, "start")
-    go_to(radio, "all")
     press(radio, QUAD)                         # Talk: four clicks back
-    assert radio.state.screen == START
-    press(radio, QUAD)                         # Start: four clicks back
     assert radio.state.screen == HOME
     press(radio, QUAD)                         # Home: four clicks leave the app
     assert radio._exit_reason == "user" and not radio.running
-
-
-def test_a_paired_device_is_picked_from_the_list(radio):
-    go_to(radio, "start")
-    go_to(radio, "device")
-    assert radio.state.screen == CONTACTS
-    assert [e.address for e in radio.state.entries] == [1, 9]
-    press(radio, THRICE)                       # talk to the first: Base
-    assert radio.state.screen == TALK
-    assert radio._target == (1, "Base")
-    assert ("hello", 1) in radio.link.sent     # calls it to check the link
-    press(radio, QUAD)
-    assert radio.state.screen == CONTACTS
-
-
-def test_a_contact_without_keys_cannot_be_talked_to(radio):
-    go_to(radio, "start")
-    go_to(radio, "device")
-    press(radio, TAP, THRICE)                  # Hilltop
-    assert radio.state.screen == CONTACTS
-    assert "pair with Hilltop first" in radio.state.active_banner
-    assert 9 in radio.state.unpaired
 
 
 def test_receive_opens_from_home_and_goes_back_there(radio):
@@ -120,15 +138,6 @@ def test_receive_opens_from_home_and_goes_back_there(radio):
     assert radio.state.screen == INBOX
     press(radio, QUAD)
     assert radio.state.screen == HOME
-
-
-def test_receive_from_talk_goes_back_to_talk(radio):
-    go_to(radio, "start")
-    go_to(radio, "all")
-    press(radio, TAP)                          # Talk: one click, Receive
-    assert radio.state.screen == INBOX
-    press(radio, QUAD)
-    assert radio.state.screen == TALK
 
 
 def test_settings_opens_from_home(radio):
@@ -158,15 +167,19 @@ def test_lists_step_back_with_two_clicks(radio):
 
 def test_home_says_who_holding_the_button_talks_to(radio):
     go_to(radio, "start")
-    go_to(radio, "device")
-    press(radio, THRICE)
+    press(radio, TAP)                          # Base
     radio._refresh_menus()
     assert "Base" in radio.state.home_items[0]["value"]
 
 
 def test_home_counts_what_is_new(radio):
-    radio.inbox.unread = 2
-    radio.inbox.items = [object(), object(), object()]
+    import time
+    for n in range(3):
+        message = protocol.Message(type=protocol.TEXT, src=1, msg_id=n, body=b"hi", flags=0,
+                                   missing=[], rssi_dbm=None, received_at=time.time(), dst=5)
+        item = radio.inbox.add_text(message, "Base")
+        if n == 0:
+            radio.inbox.mark_played(item)
     radio._refresh_menus()
     receive = next(i for i in radio.state.home_items if i["key"] == "receive")
     assert receive["value"].startswith("2 new")
@@ -205,7 +218,7 @@ def test_a_hold_in_a_menu_or_receive_does_not_talk(radio, key):
 
 def test_a_hold_on_home_says_where_talking_is(radio):
     assert hold(radio) == 0
-    assert "Start" in radio.state.active_banner
+    assert "Talk" in radio.state.active_banner
 
 
 def test_receive_says_it_is_for_listening(radio):
@@ -214,7 +227,8 @@ def test_receive_says_it_is_for_listening(radio):
     assert "listening" in radio.state.active_banner
 
 
-def test_a_hold_inside_start_talks(radio):
+def test_a_hold_inside_start_talks_in_place(radio):
     go_to(radio, "start")
     assert hold(radio) == 1
-    assert radio.state.screen == TALK
+    assert radio.state.screen == START, "the list stays, to replay or leave after"
+    assert ("hello", protocol.BROADCAST) not in radio.link.sent

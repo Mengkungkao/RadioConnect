@@ -24,9 +24,10 @@ radio:
   air_speed: 9600
   power_dbm: 22
   uart_baud: 9600
-  # ETSI caps EU 868 at 1% duty cycle: 36 seconds of transmit per hour.
-  # The app enforces it. Set 100 only where you are licensed to.
-  duty_cycle_percent: 1.0
+  # Share of each hour this radio may transmit. auto: the band's rule from
+  # MFruit OS's radio setup -- 1% for EU 868 (the legal cap, 36 s an hour),
+  # 10% for AU915 and US915 (no legal hourly cap; 10% shares the channel).
+  duty_cycle_percent: auto
   # Paired radios ping each other this often so each shows whether the
   # other is in range (Start > To a paired device). 0 turns it off.
   link_check_seconds: 120
@@ -54,10 +55,11 @@ audio:
   # Microphone level (the Whisplay card's "mic" control), set at every
   # start. 100% overdrives the preamp and sounds muddy; 80 is clear.
   mic_level: 80
-  # Codec2 mode. 3200 is the clearest and the default; 1600 is half the
-  # airtime; 700C packs the most messages into the hour but sounds
-  # robotic. Change it on the device under Settings > Voice quality.
-  codec_mode: "3200"
+  # Codec2 mode. auto: 3200 (clearest) at a 9.6k air rate, 1600 at 2.4k,
+  # where 3200 would take longer to send than to say. 700C packs the most
+  # messages into the hour but sounds robotic. Change it on the device under
+  # Settings > Voice quality.
+  codec_mode: auto
   max_record_seconds: 20
   cues: true
 

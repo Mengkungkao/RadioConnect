@@ -53,10 +53,19 @@ def sync_identity(settings, overrides) -> bool:
     # The settings MFruit OS's radio setup wrote into the module are the ones
     # it actually holds: pace packets and count airtime by them.
     provisioned = shared.load_radio()
+    from app.config.settings import radio_defaults
     if provisioned is not None:
         settings.radio.frequency_mhz = provisioned.frequency_mhz
         settings.radio.air_speed = provisioned.air_speed
         settings.radio.port = provisioned.port or settings.radio.port
+        settings.radio.provisioned = True
+        radio_defaults(settings, getattr(provisioned, "band", None))
+    else:
+        radio_defaults(settings)
+        log.warning("the radio is not set up by MFruit OS (no radio.json): assuming "
+                    "%s MHz at %s bps from config.yaml; radios set up with "
+                    "setup-radio.sh will not hear this one",
+                    settings.radio.frequency_mhz, settings.radio.air_speed)
     return True
 
 

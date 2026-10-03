@@ -16,8 +16,10 @@ from mfruit_sdk.radio.contacts import Contacts  # noqa: E402
 
 def make_settings(address=None, callsign="Base"):
     return SimpleNamespace(radio=SimpleNamespace(address=address, frequency_mhz=868,
-                                                 air_speed=9600, port="/dev/ttyS0"),
-                           identity=SimpleNamespace(callsign=callsign))
+                                                 air_speed=9600, port="/dev/ttyS0",
+                                                 duty_cycle_percent="auto"),
+                           identity=SimpleNamespace(callsign=callsign),
+                           audio=SimpleNamespace(codec_mode="auto"))
 
 
 @pytest.fixture
@@ -51,6 +53,25 @@ def test_provisioned_radio_settings_are_used(walkie_dir):
     settings = make_settings(5)
     shared_radio.sync_identity(settings, Overrides(walkie_dir))
     assert (settings.radio.frequency_mhz, settings.radio.air_speed) == (920, 2400)
+    # AU915 has no 1% rule (that is EU 868's), and 3200 voice over 2.4k air
+    # took longer to send than to say: the Orange Pi -> Pi "slow" report.
+    assert settings.radio.duty_cycle_percent == 10.0
+    assert settings.audio.codec_mode == "1600"
+
+
+def test_without_the_radio_setup_the_strictest_rule_applies(walkie_dir):
+    settings = make_settings(5)
+    shared_radio.sync_identity(settings, Overrides(walkie_dir))
+    assert settings.radio.duty_cycle_percent == 1.0
+    assert settings.audio.codec_mode == "3200"           # config.yaml's 9.6k
+
+
+def test_a_chosen_voice_quality_and_duty_cycle_are_kept(walkie_dir):
+    shared.save_radio(shared.RadioSettings(frequency_mhz=920, air_speed=2400, band="au915"))
+    settings = make_settings(5)
+    settings.audio.codec_mode, settings.radio.duty_cycle_percent = "700C", "2.5"
+    shared_radio.sync_identity(settings, Overrides(walkie_dir))
+    assert (settings.audio.codec_mode, settings.radio.duty_cycle_percent) == ("700C", 2.5)
 
 
 def test_own_keys_are_adopted_once_and_kept(walkie_dir):

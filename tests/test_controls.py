@@ -14,7 +14,7 @@ import pytest
 from mfruit_sdk.input import InputController
 from mfruit_sdk.keys import DOWN, REPEAT, UP, KeyEvent
 
-from app.ui.screens import CONTACTS, EDIT, HOME, INBOX, PAIR, SETTINGS, START, STATUS, TALK
+from app.ui.screens import CHAT, CONTACTS, EDIT, HOME, INBOX, PAIR, SETTINGS, START, STATUS, TALK
 from tests.test_menu import FakeRecorder, radio  # noqa: F401
 from tests.test_settings_flow import app  # noqa: F401
 
@@ -92,7 +92,7 @@ def test_a_hold_inside_start_talks_while_held(wired):
     wired.input.press()
     step(wired, 0.8)
     assert wired.recorder.started == 1          # talking before release
-    assert wired.state.screen == TALK
+    assert wired.state.screen == START          # talks in place, on the list
     wired.input.release()
 
 
@@ -175,12 +175,11 @@ def test_home_back_only_exits_when_selected_and_released(wired):
     assert not wired.running and wired._exit_reason == "user"
 
 
-@pytest.mark.parametrize("screen", [START, CONTACTS])
+@pytest.mark.parametrize("screen", [START, CHAT])
 def test_hold_back_on_talk_lists_never_starts_the_microphone(wired, screen):
-    key(wired, "enter")  # Start
-    if screen == CONTACTS:
-        key(wired, "down")
-        key(wired, "enter")
+    key(wired, "enter")  # Talk
+    if screen == CHAT:
+        key(wired, "enter")  # Everyone's conversation (Enter on a radio's row)
     key(wired, "up")  # first row -> Back
     assert wired.state.screen == screen and wired.state.back_selected
     wired._refresh_entries()  # normal radio refresh must preserve Back
@@ -263,7 +262,7 @@ def test_space_talks_on_talk_screens_only(wired):
     key(wired, "space", UP)
     key(wired, "enter")                         # Start
     key(wired, "space")
-    assert wired.recorder.started == 1 and wired.state.screen == TALK
+    assert wired.recorder.started == 1 and wired.state.screen == START
     key(wired, "space", UP)
 
 
