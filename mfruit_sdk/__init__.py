@@ -12,8 +12,10 @@ which is what lets the same files work under either package name.
     ui         theme, fonts, status bar, footer hints, lists, toast, RGB565
     radio      the shared LoRa radio: settings, Device ID, keys, contacts
                (keyring/crypto need the cryptography package)
+    background ask MFruit OS to keep the app running after the user leaves
+               it, optionally with the screen held at full brightness
 
 See APP_DEVELOPMENT.md ("MFruit App SDK") and docs/APP_RULES.md.
 """
 
-SDK_VERSION = "1.3.0"
+SDK_VERSION = "1.4.0"

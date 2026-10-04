@@ -42,6 +42,7 @@ from app.config.settings import Contact
 from mfruit_sdk.input import (BACK, CHAR, ERASE, KEYBOARD, SELECT, TALK_END, TALK_START,
                               InputController)
 from mfruit_sdk.status import StatusMonitor
+from mfruit_sdk import background as mfruit_background
 
 from app.chat import ChatController
 from app.radio import protocol
@@ -171,6 +172,9 @@ class WalkieApp:
         self._closing = False
         self._wake = threading.Event()
         self._exit_reason = "normal"
+        # MFruit OS's Keep running / Keep screen bright for this app (SDK
+        # background); None until asked, or when MFruit OS cannot say.
+        self._background = mfruit_background.get()
 
         # --- display and input -----------------------------------------
         self.board, self.mode = board_module.acquire_board(
@@ -499,7 +503,10 @@ class WalkieApp:
         if action is None:
             return
         if action == navigation.EXIT_APP:
-            self.stop("user")
+            if self._keeps_running():
+                self._leave_to_background()
+            else:
+                self.stop("user")
             return
         handler = self._actions.get(action)
         if handler is None:
@@ -815,6 +822,8 @@ class WalkieApp:
              "value": self._voice_summary(self.settings.audio.codec_mode)},
             {"key": "paired", "label": "Paired radios",
              "value": self._paired_summary()},
+            {"key": "background", "label": "Listen in background",
+             "value": self._background_summary()},
             {"key": "base", "label": "Base station", "value": base_name},
             {"key": "clock", "label": "Date & time",
              "value": clock.now().strftime("%Y-%m-%d %H:%M") + "  ·  " + clock.describe()},
@@ -827,6 +836,64 @@ class WalkieApp:
     def _paired_summary(self) -> str:
         count = len([e for e in self.roster.entries() if not e.is_broadcast])
         return f"{count} paired  ·  unpair one" if count else "none yet"
+
+    # --- listening in the background (MFruit OS Keep running) ---------------
+    def _background_summary(self) -> str:
+        state = getattr(self, "_background", None)
+        if state is None:
+            return "needs MFruit OS 1.4 or newer"
+        if state.keep_running and state.screen_bright:
+            return "on  ·  listens after you leave"
+        if state.keep_running:
+            return "on  ·  dimming deafens radio"   # Keep screen bright off in MFruit OS
+        return "off  ·  closes when you leave"
+
+    def _toggle_background(self):
+        """Settings > Listen in background: one switch for both of MFruit OS's.
+
+        On: leaving releases the screen instead of closing, MFruit OS keeps
+        the process and holds the backlight at 100% -- the backlight pin is
+        the radio's M0, and dimming it leaves the radio deaf.
+        """
+        state = getattr(self, "_background", None) or mfruit_background.get()
+        if state is None:
+            self.state.flash("needs MFruit OS 1.4 or newer", 4.0)
+            self._refresh_settings()
+            return
+        on = not (state.keep_running and state.screen_bright)
+        new = mfruit_background.set(keep_running=on, screen_bright=on)
+        if new is None:
+            self.state.flash("MFruit OS did not answer; unchanged", 4.0)
+            return
+        self._background = new
+        log.info("listen in background: %s", "on" if on else "off")
+        self.state.flash("listens after you leave" if on else "closes when you leave", 4.0)
+        self._refresh_settings()
+
+    def _keeps_running(self) -> bool:
+        """Ask again on the way out: the user may have changed it in MFruit OS."""
+        state = mfruit_background.get() or getattr(self, "_background", None)
+        self._background = state
+        return bool(state and state.keep_running)
+
+    def _leave_to_background(self):
+        """Leave without exiting: give the screen back, keep the radio listening.
+
+        MFruit OS's app contract for a background app: release the screen,
+        stay quiet, never ask for it again; MFruit OS hands it back when the
+        user opens the app from Home (``_on_foreground``).
+        """
+        log.info("leaving to the background; still listening")
+        self.state.screen = HOME
+        self.input.reset()
+        try:
+            self.board.foreground_ready = False
+        except Exception:
+            pass
+        try:
+            self.board.release_focus()
+        except Exception:
+            log.warning("could not release the screen", exc_info=True)
 
     def _open_paired(self):
         """Settings > Paired radios: the list to unpair from."""
@@ -890,6 +957,7 @@ class WalkieApp:
             "name": self._edit_name, "device_id": self._edit_device_id,
             "channel": self._edit_channel, "voice": self._edit_voice,
             "base": self._edit_base, "paired": self._open_paired,
+            "background": self._toggle_background,
             "clock": self._edit_clock, "reset": self._edit_reset,
             "back": self._go_back,
         }[key]

@@ -9,7 +9,8 @@ uses WalkieTalkie's radio protocol (version 3), so it works with radios still
 running WalkieTalkie. Radios running the old Messenger use a different
 protocol and need RadioConnect to talk to it.
 
-> **Status: 0.4.0, in development.** Talk, Chats, pairing and unpairing.
+> **Status: 0.5.0, in development.** Talk, Chats, pairing and unpairing,
+> listening in the background.
 > SOS is next ([CONTINUE.md](CONTINUE.md)). It is not a certified emergency
 > service.
 
@@ -66,6 +67,22 @@ air, the asking radio asks again and gets it, without a second question.
 That removes its keys, contact and name in every radio app on this device. Its
 past messages stay in Chats' history. Unpair on the other radio too, or it will
 keep sending messages this one can no longer read.
+
+## Listening in the background
+
+**Settings → Listen in background** (needs MFruit OS 1.4 with SDK 1.4.0 or
+newer). When it is on, leaving RadioConnect (four clicks or Esc on its first
+screen) gives the screen back to MFruit OS but keeps the radio listening:
+messages and voice still arrive and are acknowledged, and you see them when
+you open RadioConnect again from Home.
+
+The screen then stays at full brightness until RadioConnect stops. On the
+LoRa HAT with its stock jumpers the backlight pin is also the radio's M0, and
+any dimming or screen-off leaves the radio deaf (measured on two boards: no
+packet heard at 80% or 15%, all at 100%). The switch turns on both of MFruit
+OS's *Keep running* and *Keep screen bright* for RadioConnect, which you also
+find in **MFruit OS Settings → Apps → RadioConnect**. To stop listening, turn
+the switch off, or stop the app there.
 
 ## Chats
 

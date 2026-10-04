@@ -124,3 +124,74 @@ def test_the_microphone_re_arms_once_visible_again(app):
     app.board.foreground_ready = True
     app._follow_idle_with_the_microphone()
     assert app.recorder.armed is True
+
+
+# --- Listen in background (MFruit OS Keep running + Keep screen bright) ----
+from mfruit_sdk import background as mfruit_background  # noqa: E402
+from app import main as main_module  # noqa: E402
+
+
+class ReleasingBoard(FakeBoard):
+    def __init__(self):
+        super().__init__()
+        self.released = 0
+
+    def release_focus(self):
+        self.released += 1
+
+
+def test_leaving_with_keep_running_releases_the_screen_and_keeps_listening(app, monkeypatch):
+    app.board = ReleasingBoard()
+    monkeypatch.setattr(main_module.mfruit_background, "get",
+                        lambda app_id="": mfruit_background.State(True, True))
+    app._dispatch(nav.EXIT_APP)
+    assert app.board.released == 1
+    assert app.running is True and app._closing is False
+    assert app.link.stopped is False
+    assert app.board.foreground_ready is False
+    assert app.state.screen == HOME          # opened again from Home: starts at Home
+    assert app.input.resets == 1
+
+
+def test_leaving_without_keep_running_exits_as_before(app, monkeypatch):
+    app.board = ReleasingBoard()
+    monkeypatch.setattr(main_module.mfruit_background, "get",
+                        lambda app_id="": mfruit_background.State(False, False))
+    app._dispatch(nav.EXIT_APP)
+    assert app.running is False
+    assert app.board.released == 0
+
+
+def test_without_mfruit_os_leaving_exits(app, monkeypatch):
+    monkeypatch.setattr(main_module.mfruit_background, "get", lambda app_id="": None)
+    app._background = None
+    app._dispatch(nav.EXIT_APP)
+    assert app.running is False
+
+
+def test_the_switch_sets_both_mfruit_os_switches(app, monkeypatch):
+    calls = []
+
+    def fake_set(keep_running=None, screen_bright=None, app_id=""):
+        calls.append((keep_running, screen_bright))
+        return mfruit_background.State(keep_running, screen_bright)
+    monkeypatch.setattr(main_module.mfruit_background, "set", fake_set)
+    app._refresh_settings = lambda: None
+    app._background = mfruit_background.State(False, False)
+    app._toggle_background()
+    assert calls == [(True, True)]
+    assert "listens after you leave" in app._background_summary()
+    app._toggle_background()
+    assert calls[-1] == (False, False)
+    assert app._background_summary().startswith("off")
+
+
+def test_the_switch_explains_an_older_mfruit_os(app, monkeypatch):
+    monkeypatch.setattr(main_module.mfruit_background, "get", lambda app_id="": None)
+    monkeypatch.setattr(main_module.mfruit_background, "set",
+                        lambda **kwargs: pytest.fail("must not ask an MFruit OS that cannot answer"))
+    app._refresh_settings = lambda: None
+    app._background = None
+    app._toggle_background()
+    assert "MFruit OS" in app.state.banner
+    assert app._background_summary() == "needs MFruit OS 1.4 or newer"

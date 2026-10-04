@@ -99,8 +99,8 @@ def play(app, *names):
 def test_settings_lists_every_promised_entry(app):
     app._open_settings()
     keys = [item["key"] for item in app.state.settings_items]
-    assert keys == ["name", "device_id", "channel", "voice", "paired", "base", "clock",
-                    "reset", "back"]
+    assert keys == ["name", "device_id", "channel", "voice", "paired", "background", "base",
+                    "clock", "reset", "back"]
     assert app.state.screen == SETTINGS
 
 
@@ -109,12 +109,18 @@ def test_opening_a_setting_enters_an_editor(app):
     assert app.state.screen == EDIT and app.state.editor is not None
 
 
-def test_every_settings_row_opens_without_error(app):
+def test_every_settings_row_opens_without_error(app, monkeypatch):
+    from app import main as main_module
+    monkeypatch.setattr(main_module.mfruit_background, "get", lambda app_id="": None)
     app._open_settings()
     for index, item in enumerate(app.state.settings_items):
         if item["key"] in ("back", "paired"):     # paired opens a list (test_unpair)
             continue
         app.state.settings_index = index
+        if item["key"] == "background":           # a switch, not an editor (test_background)
+            app._open_setting()
+            assert app.state.screen == SETTINGS
+            continue
         app._open_setting()
         assert app.state.screen == EDIT
         play(app, QUAD)                      # cancel back out

@@ -90,8 +90,10 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
   until the app's first frame.
 - On `app_exit_requested`, stop within 3 seconds. When the user leaves, exit
   completely — MFruit OS stops the process group 3 s later — unless the
-  manifest sets `"background": true` (the app must keep receiving, e.g.
-  messages); a background app releases the screen and stays quiet.
+  manifest sets `"background": true` or the user (or the app, through
+  `mfruit_sdk.background`) turned on *Keep running* (the app must keep
+  receiving, e.g. messages); a background app releases the screen and stays
+  quiet.
 - Never keep the screen while not in the foreground; never fight for focus.
 - The managed runtime: the working directory is the active version folder;
   `WHISPLAY_APP_ID`, `WHISPLAY_OS_APP_DIR` (code, replaced on update),
