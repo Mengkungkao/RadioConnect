@@ -23,12 +23,12 @@ into one app, following MFruit OS's app integration rules
 | U1 | Talk screen redesign (user) | DONE 0.3.0: Talk lists Everyone + paired radios + Replay last voice + Conversations + Back; moving chooses the target; hold talks in place (disc overlay, then back to the list); 3x/Enter opens the conversation; voice is acknowledged too (ACK), ✓/✓✓/not confirmed/not sent on rows and bubbles, arrival pop-up |
 | U2 | Unpair (user) | DONE 0.3.2: Settings › Paired radios, hold → confirm; removes keys (shared), contact, shared name; target falls back to Everyone. Pi: stale 6235 unpaired on the device |
 | U3 | User: long voice "duty cycle full", Orange Pi slow, sender names | DONE 0.4.0: duty cycle by band (eu868 1%, au915/us915 10%; config.yaml `auto`); codec by air rate (1600 at 2.4k; was 3200 = 1.6x slower than speech); messages wait up to 10 min for airtime instead of being refused; floating pill pending/sending on every screen and "pending" on the talking disc; sender name on received bubbles; config.yaml no longer persisted (so `auto` reaches existing installs; device settings are in data/). Installed on both: codec2=1600. NOT verified on device: a >7 s message end to end (needs a person to hold the button) |
-| B1 | Listen in background (user, 2026-10-04): Settings switch; leaving releases the screen and keeps listening; MFruit OS SDK 1.4.0 `background` sets Keep running + Keep screen bright (the backlight pin is the radio's M0: dimming deafens it, measured 0/20 vs 40/40) | DONE 0.5.0: 5 new tests (negative control), settings-row tests updated, 680 pass; preview checked. DEVICE (Pi, 2026-10-04): switch on, leave, a quick reply from the Orange Pi received and acknowledged in the background 8 min later (✓✓), reopened the same process, switch off (MFruit OS record 2026-10-04-radio-over-the-air). Uncommitted; the Fruit Store catalogue still pins 0.4.0 (`959354d`) until this is pushed and the catalogue ref updated |
+| B1 | Listen in background (user, 2026-10-04): Settings switch; leaving releases the screen and keeps listening; MFruit OS SDK 1.4.0 `background` sets Keep running + Keep screen bright (the backlight pin is the radio's M0: dimming deafens it, measured 0/20 vs 40/40) | DONE 0.5.0: 5 new tests (negative control), settings-row tests updated, 680 pass; preview checked. DEVICE (Pi, 2026-10-04): switch on, leave, a quick reply from the Orange Pi received and acknowledged in the background 8 min later (✓✓), reopened the same process, switch off (MFruit OS record 2026-10-04-radio-over-the-air). Committed and pushed as `29694c4`; the MFruit OS Fruit Store list pins 0.5.0 since 2026-10-05 |
 | R2 | SOS on protocol v3: one new type (0xF, the last free one) with a subtype byte (SOS, I'm OK); repeated until acknowledged, alarm, countdown; port Messenger's `emergency.py` logic and screens | TODO |
 | R3 | Home: Talk · Chats · SOS · Pair · Settings · Status; footer hints from the one navigation table | TODO |
 | R4 | Tests: controls through the real InputController, every screen inside the chrome, SOS and chat flows | TODO |
 | R5 | check-app, sideload on the Pi, launch/exit, Fruit Store update/rollback/uninstall; record | TODO |
-| R6 | Catalogue entry in MFruit OS (after the user creates and pushes the GitHub repo) | TODO |
+| R6 | Catalogue entry in MFruit OS | DONE: native entry since 0.4.0 (MFruit OS `3413c72`), 0.5.0 (`29694c4`) on 2026-10-05. MFruit OS downloads the Store list from GitHub and offers *Update to <version>* to devices with an older RadioConnect, so a new version needs a new `ref`/`sha256`/`version` in MFruit OS `config/catalog.json` (`tools/build-release.sh` is only for sideload archives) |
 
 ## Facts
 
@@ -46,7 +46,8 @@ into one app, following MFruit OS's app integration rules
 
 ## Not done / not verified
 
-- GitHub repository exists (`origin`); the user committed only the README so far.
+- GitHub repository: `origin`, `main` pushed through 0.5.0 (`29694c4`). No tags
+  or GitHub releases: versions reach devices through the Fruit Store list.
   Logger names and the lock file are `radioconnect` now.
 - `docs/walkietalkie-reference.md` describes WalkieTalkie. Update it as
   RadioConnect's behaviour diverges.
