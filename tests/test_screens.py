@@ -468,7 +468,7 @@ needs_inter = pytest.mark.skipif(
 
 @needs_inter
 def test_page_names_fit_the_status_bar():
-    """The page name shares the bar with the signal meter, WiFi and a
+    """The page name shares the bar with the radios in range, WiFi and a
     three-digit battery; a truncated name ("Receive…") reads as a glitch."""
     from mfruit_sdk.status import Status
     from mfruit_sdk.ui import Canvas, status_bar
@@ -476,7 +476,7 @@ def test_page_names_fit_the_status_bar():
     from app.ui import screens as scr
 
     probe = Canvas()
-    slot = status_bar(probe, "", Status(3, 100, True), reserve=scr.SIGNAL_SLOT)
+    slot = status_bar(probe, "", Status(3, 100, True), reserve=scr.RANGE_SLOT)
     room = slot - 6 - 16 - 6
     for title in list(scr.PAGE_TITLES.values()) + list(scr.EDITOR_TITLES.values()):
         assert probe.text_width(title, 17, "bold") <= room, f"{title!r} does not fit"

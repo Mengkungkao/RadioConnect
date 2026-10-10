@@ -10,7 +10,8 @@ running WalkieTalkie. Radios running the old Messenger use a different
 protocol and need RadioConnect to talk to it.
 
 > **Status: 0.6.0, in development.** Talk, Chats, pairing and unpairing,
-> listening in the background, listen before talk.
+> listening in the background, listen before talk, radios in range in the
+> status bar.
 > SOS is next ([CONTINUE.md](CONTINUE.md)). It is not a certified emergency
 > service.
 
@@ -62,6 +63,14 @@ confirm.
 **Home → Pair devices** on both radios, then hold on the other radio's name
 on one of them and accept the code on the other. If the answer is lost on the
 air, the asking radio asks again and gets it, without a second question.
+
+The status bar shows a small radio and how many paired radios are in range
+right now: green, amber when every one of them is only weakly heard, a grey
+**0** when none answers. Paired radios check on each other every two minutes
+(`link_check_seconds`). When a radio connects, comes back or drops out, a
+pop-up says which, and how many are in range with it ("Ridge connected · 2 in
+range"). Before 0.6.0 that place held four signal bars for the last packet
+heard; that signal is still on **Status** and on the range test.
 
 **Settings → Paired radios** lists them. Hold on one to unpair it, then confirm.
 That removes its keys, contact and name in every radio app on this device. Its

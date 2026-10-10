@@ -181,3 +181,70 @@ def test_pings_do_not_light_the_screen(radio):
     radio.display.poke = lambda: pokes.append(1)
     ping_from_base(radio)
     assert pokes == []
+
+
+# --- the status bar: how many radios are in range --------------------------------
+def ping_from(radio, src, name, rssi=-80):
+    body = protocol.ping_body(1, 120, reports={radio.settings.radio.address: -85})
+    radio._on_radio_message(
+        protocol.Message(type=protocol.PING, src=src, msg_id=1, body=body, flags=0,
+                         missing=[], rssi_dbm=rssi, received_at=0.0),
+        SimpleNamespace(name=name))
+
+
+def test_the_status_bar_counts_the_radios_in_range(radio, tmp_path):
+    ridge = Keyring(tmp_path / "ridge")
+    radio.keyring.add_peer(12, ridge.public, ridge.broadcast_key)
+    radio.settings.contacts.append(Contact("Ridge", 12))
+    radio.roster = Roster(radio.settings.contacts, tmp_path)
+    radio.monitor.watch([1, 12], __import__("time").monotonic())   # what pairing does
+
+    radio._update_link_status()
+    assert radio.state.radios_in_range == 0
+
+    ping_from(radio, 1, "Base")
+    radio._update_link_status()
+    assert radio.state.radios_in_range == 1
+    assert radio.state.active_banner == "Base connected"
+
+    ping_from(radio, 12, "Ridge")                       # a second radio connects
+    radio._update_link_status()
+    assert radio.state.radios_in_range == 2
+    assert radio.state.active_banner == "Ridge connected  ·  2 in range"
+
+    radio.monitor.peers[1].last_heard -= 1000          # Base drops out
+    radio._update_link_status()
+    assert radio.state.radios_in_range == 1
+    assert radio.state.active_banner == "Base disconnected  ·  1 in range"
+
+
+def test_weak_radios_count_but_say_so(radio):
+    ping_from(radio, 1, "Base", rssi=-115)
+    radio._update_link_status()
+    assert radio.state.radios_in_range == 1 and radio.state.radios_weak
+
+
+def test_a_radio_that_needs_pairing_again_is_not_counted(radio):
+    ping_from(radio, 1, "Base")
+    radio.link.unreadable[1] = 1.0
+    radio._update_link_status()
+    assert radio.state.radios_in_range == 0
+
+
+@pytest.mark.parametrize("count,weak,colour", [
+    (0, False, "TEXT_FAINT"), (1, False, "OK"), (2, True, "WARN"),
+])
+def test_the_count_replaces_the_signal_bars(display, count, weak, colour):
+    from app.ui import theme
+
+    state = populated_state(screen=CONTACTS, radios_in_range=count, radios_weak=weak,
+                            last_rssi=-60)
+    image, draw = display.new_canvas()
+    screens.draw_header(draw, state, "Paired")
+    bar = image.crop((0, 0, theme.SCREEN_WIDTH, 30))
+    pixels = list(bar.getdata())
+    assert getattr(theme, colour) in pixels, "the icon and number in their colour"
+    if count:
+        assert theme.TEXT_FAINT not in pixels or colour == "TEXT_FAINT"
+    # The old meter's empty bars were SURFACE_HI; nothing of it is left.
+    assert theme.SURFACE_HI not in pixels

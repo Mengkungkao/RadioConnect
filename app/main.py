@@ -49,7 +49,7 @@ from app.radio import protocol
 from app.radio import modepins
 from app.config.settings import hostname_callsign
 from app.radio.link import MAX_AIRTIME_WAIT, LoraLink, NotPaired
-from app.radio.linkcheck import DISCONNECTED, IN_RANGE, WEAK, LinkMonitor
+from app.radio.linkcheck import DISCONNECTED, IN_RANGE, UNKNOWN, WEAK, LinkMonitor
 from app.radio.sx126x import PortBusy, SX126x, port_conflicts
 from app.rangetest import RangeTest
 from app.store import legacy_import
@@ -1602,18 +1602,26 @@ class WalkieApp:
         if self.monitor is None:
             return
         now = time.monotonic()
-        for addr, old, new in self.monitor.update(now):
+        changes = self.monitor.update(now)
+        unreadable = self.link.unreadable if self.link is not None else {}
+        reachable = [a for a in self.monitor.peers if a not in unreadable
+                     and self.monitor.state_of(a, now) in (IN_RANGE, WEAK)]
+        for addr, old, new in changes:
             name = self._name_of(addr)
             log.info("link check: %s (%d) %s -> %s", name, addr, old, new)
+            # With more than one radio about, say how many: "Base connected · 2 in range".
+            others = f"  ·  {len(reachable)} in range" if len(reachable) > 1 else ""
             if new == DISCONNECTED and old in (IN_RANGE, WEAK):
-                self.state.flash(f"{name} disconnected", 4.0)
+                left = f"  ·  {len(reachable)} in range" if reachable else ""
+                self.state.flash(f"{name} disconnected{left}", 4.0)
                 if self.settings.audio.cues:
                     self.player.cue(self.cues.error)
             elif new in (IN_RANGE, WEAK) and old == DISCONNECTED:
-                self.state.flash(f"{name} back in range", 3.0)
+                self.state.flash(f"{name} back in range{others}", 3.0)
                 if self.settings.audio.cues:
                     self.player.cue(self.cues.tx_done)
-        unreadable = self.link.unreadable if self.link is not None else {}
+            elif new in (IN_RANGE, WEAK) and old == UNKNOWN:
+                self.state.flash(f"{name} connected{others}", 3.0)
         status = {}
         for addr in list(self.monitor.peers):
             if addr in unreadable:
@@ -1624,6 +1632,9 @@ class WalkieApp:
                 status[addr] = (self.monitor.state_of(addr, now),
                                 self.monitor.summary(addr, now))
         self.state.link_status = status
+        in_range = [s for s, _ in status.values() if s in (IN_RANGE, WEAK)]
+        self.state.radios_in_range = len(in_range)
+        self.state.radios_weak = bool(in_range) and all(s == WEAK for s in in_range)
 
     # --- asking for a message again ----------------------------------------------
     def _fetch_state(self):

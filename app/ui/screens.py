@@ -17,7 +17,7 @@ from mfruit_sdk.ui import Canvas, Row, draw_list, footer, status_bar, toast
 from mfruit_sdk.ui import theme as mfruit_layout
 
 from app.ui import theme
-from app.ui.widgets import (centred, ellipsise, meter, panel, signal_bars,
+from app.ui.widgets import (centred, ellipsise, meter, panel, radio_count, signal_bars,
                             two_line_row, vu_meter)
 
 CONTACTS = "contacts"
@@ -62,11 +62,12 @@ CONTENT_HEIGHT = CONTENT_BOTTOM - CONTENT_TOP
 BACK_TOP = CONTENT_BOTTOM - 32
 LIST_BOTTOM = BACK_TOP - 6
 
-# Room in the status bar for the LoRa signal meter, left of WiFi/battery.
-SIGNAL_SLOT = 20
+# Room in the status bar for the radios-in-range count, left of WiFi/battery
+# (a radio icon and one digit; a second digit takes 1 px of the gap).
+RANGE_SLOT = 22
 
 # Editor titles are identifiers in app.main; this is how they read on screen.
-# Page names share the status bar with the signal meter, WiFi and battery,
+# Page names share the status bar with the radios in range, WiFi and battery,
 # so they stay short (tests/test_screens.py checks every one fits).
 EDITOR_TITLES = {
     "DEVICE ID": "Device ID", "NAME": "Name", "CHANNEL": "Channel", "VOICE": "Voice",
@@ -174,6 +175,10 @@ class ViewState:
     target_linked: bool = False
     # From the link check: addr -> (state, "in range · -85/-91 dBm").
     link_status: dict = field(default_factory=dict)
+    # Paired radios answering the link check now, for the status bar;
+    # radios_weak: every one of them is only weakly heard.
+    radios_in_range: int = 0
+    radios_weak: bool = False
     # Home > Range test, while it runs (see app.rangetest).
     range_view: dict = field(default_factory=dict)
 
@@ -276,15 +281,23 @@ def _status(state: ViewState) -> Status:
     return Status(state.wifi_level, battery, state.battery_charging)
 
 
-def draw_header(draw, state: ViewState, title: str):
-    """mFruit OS's status bar: page name, then LoRa signal, WiFi, battery.
+def range_colour(state: ViewState):
+    if not state.radios_in_range:
+        return theme.TEXT_FAINT
+    return theme.WARN if state.radios_weak else theme.OK
 
-    The signal meter answers "how far can I reach"; it sits in a slot
-    the status bar keeps free for it.
+
+def draw_header(draw, state: ViewState, title: str):
+    """mFruit OS's status bar: page name, then radios in range, WiFi, battery.
+
+    The count answers "who can I reach": how many paired radios answer
+    the link check now (green; amber when all are weak; a grey 0 when
+    none). It sits in a slot the status bar keeps free for it.
     """
     canvas = Canvas.over(draw, theme.MFRUIT)
-    slot = status_bar(canvas, title, _status(state), reserve=SIGNAL_SLOT)
-    signal_bars(draw, slot, mfruit_layout.STATUS_Y + 2, state.last_rssi)
+    slot = status_bar(canvas, title, _status(state), reserve=RANGE_SLOT)
+    radio_count(draw, slot, mfruit_layout.STATUS_Y + 2, state.radios_in_range,
+                range_colour(state))
 
 
 def draw_footer(draw, state: ViewState, hints: list):

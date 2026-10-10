@@ -68,6 +68,18 @@ def signal_bars(draw, x: int, y: int, rssi, height: int = 12):
         )
 
 
+def radio_count(draw, x: int, y: int, count: int, colour, height: int = 12) -> int:
+    """A handheld radio and how many radios are in range: "2" means two
+    paired radios answer right now. Returns the width drawn."""
+    draw.rectangle([x + 1, y, x + 2, y + 3], fill=colour)                 # antenna
+    draw.rounded_rectangle([x, y + 3, x + 7, y + height], radius=1, fill=colour)
+    draw.rectangle([x + 2, y + 5, x + 5, y + 7], fill=theme.BG)           # its screen
+    font = theme.font(12, "bold")
+    text = str(count)
+    draw.text((x + 10, y - 1), text, font=font, fill=colour)
+    return 10 + int(draw.textlength(text, font=font))
+
+
 def meter(draw, box, fraction: float, fill, track=theme.SURFACE_HI, radius=3):
     """Horizontal progress/level bar clamped to 0..1."""
     x0, y0, x1, y1 = box

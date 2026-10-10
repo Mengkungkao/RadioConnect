@@ -74,7 +74,7 @@ def sample(**overrides) -> ViewState:
             Item("c", "voice", 1, "Base", 1.0, None, duration=9.9, played=True),
         ],
         unread=2, target_name="Base", target_address=1, last_rssi=-88,
-        duty_fraction=0.42, codec_name="700C", battery_present=True,
+        duty_fraction=0.42, codec_name="700C", battery_present=True, radios_in_range=2,
         battery_percent=76.0, battery_summary="76%  ·  about 5 h", wifi_level=3,
         stats={"packets_tx": 12, "packets_rx": 34, "frames_dropped": 2, "air": "2.4k",
                "noise": -108, "waits": "waited 3x"},
