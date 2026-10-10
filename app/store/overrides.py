@@ -131,6 +131,22 @@ class Overrides:
         self.set("radio", "address", address)
         return address
 
+    # --- what the radio module can do -------------------------------------
+    def module_reports_level(self, provisioned_at: str = ""):
+        """Whether the module answered the channel-level query (listen before
+        talk): True, False, or None when it has not been asked since mFruit
+        OS's radio setup last wrote it (``provisioned_at``)."""
+        fact = self.data.get("module")
+        if not isinstance(fact, dict) or fact.get("provisioned_at", "") != provisioned_at:
+            return None
+        value = fact.get("reports_level")
+        return value if isinstance(value, bool) else None
+
+    def remember_module_reports_level(self, value: bool, provisioned_at: str = ""):
+        self.data["module"] = {"reports_level": bool(value),
+                               "provisioned_at": provisioned_at}
+        self.save()
+
     @property
     def node_token(self) -> bytes:
         """This installation's random token; see protocol.TOKEN_SIZE."""

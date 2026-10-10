@@ -59,6 +59,7 @@ def sync_identity(settings, overrides) -> bool:
         settings.radio.air_speed = provisioned.air_speed
         settings.radio.port = provisioned.port or settings.radio.port
         settings.radio.provisioned = True
+        settings.radio.provisioned_at = getattr(provisioned, "provisioned_at", "") or ""
         radio_defaults(settings, getattr(provisioned, "band", None))
     else:
         radio_defaults(settings)

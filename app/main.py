@@ -316,7 +316,12 @@ class WalkieApp:
             callsign=self.settings.identity.callsign,
             addr=radio_settings.address, token=self.overrides.node_token,
             keyring=self.keyring, channel=radio_settings.privacy_channel,
+            listen_before_talk=radio_settings.listen_before_talk,
+            noise_check=radio_settings.listen_before_talk,
+            noise_known=self.overrides.module_reports_level(radio_settings.provisioned_at),
         )
+        # Learnt on the radio's transmit thread; written by the main loop.
+        self.link.on_noise_probed = self._module_level_learnt
         # The module is deaf unless M0/M1 are both low, and on this
         # hardware the LCD drives those pins. Say so rather than letting
         # every transmission succeed into nothing.
@@ -2216,15 +2221,43 @@ class WalkieApp:
         now = time.monotonic()
         if tx is not None and tx.kind in ("voice", "text"):
             who = "everyone" if tx.dst == protocol.BROADCAST else self._name_of(tx.dst)
+            if tx.waiting_until > now and getattr(tx, "why", "airtime") == "channel":
+                return f"pending: {tx.kind} to {who} · channel busy"
             if tx.waiting_until > now:
                 left = int(tx.waiting_until - now + 0.999)
                 return f"pending: {tx.kind} to {who} · airtime in {left // 60}:{left % 60:02d}"
             return f"sending {tx.kind} to {who} · {tx.sent}/{tx.total}"
         if queued and tx is not None and tx.waiting_until > now:
+            if getattr(tx, "why", "airtime") == "channel":
+                return f"pending: {queued} waiting for a clear channel"
             return f"pending: {queued} waiting for airtime"
         return ""
 
+    _level_to_remember = None
+
+    def _module_level_learnt(self, reports: bool):
+        """The link asked the module for the channel level (transmit thread)."""
+        self._level_to_remember = reports
+        self._wake.set()
+
+    def _remember_module_level(self):
+        reports, self._level_to_remember = self._level_to_remember, None
+        if reports is not None:
+            self.overrides.remember_module_reports_level(
+                reports, self.settings.radio.provisioned_at)
+
+    def _channel_summary(self) -> dict:
+        """Listen before talk, for Status: the channel level and the waits."""
+        link = self.link
+        if link is None or getattr(link, "sense", None) is None:
+            return {"noise": None, "waits": "LBT off"}
+        stats = link.stats
+        noise = stats.noise_dbm if link.noise_supported else None
+        return {"noise": noise,
+                "waits": f"waited {stats.lbt_waits}x" if stats.lbt_waits else ""}
+
     def _sync_state(self):
+        self._remember_module_level()
         self.state.wifi_level = self.status.sample().wifi_level
         self.state.outbox = self._outbox_text()
         if self.chat is not None and self.state.screen in (CHATS, CHAT):
@@ -2249,6 +2282,7 @@ class WalkieApp:
                 "frames_dropped": stats.frames_dropped,
                 "messages_rx": stats.messages_rx,
                 "air": f"{self.settings.radio.air_speed / 1000:g}k",
+                **self._channel_summary(),
             }
         self.state.unread = self.inbox.unread
         self._update_link_status()

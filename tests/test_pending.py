@@ -37,6 +37,17 @@ def test_pending_then_sending_then_nothing(radio):
     assert radio._outbox_text() == ""
 
 
+def test_a_message_waiting_for_the_channel_says_so(radio):
+    """Listen before talk: held for another radio, not for the hour's airtime."""
+    now = time.monotonic()
+    radio.link.pending = lambda: 0
+    radio.link.sending = TxStatus("text/4", BASE, 0, 1, now + 3, why="channel")
+    assert radio._outbox_text() == "pending: text to Base · channel busy"
+    radio.link.pending = lambda: 2
+    radio.link.sending = TxStatus("ack/9", BASE, 0, 1, now + 3, why="channel")
+    assert radio._outbox_text() == "pending: 2 waiting for a clear channel"
+
+
 def test_the_pill_floats_over_talk_and_conversations():
     for screen in (START, CHAT):
         state = ViewState(screen=screen, outbox="pending: voice to Base · airtime in 0:42",

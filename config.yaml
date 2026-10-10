@@ -31,6 +31,11 @@ radio:
   # Paired radios ping each other this often so each shows whether the
   # other is in range (Start > To a paired device). 0 turns it off.
   link_check_seconds: 120
+  # Listen before talk: before each message, wait until no other radio is
+  # sending (and, for a request, until its answer has had time to come).
+  # Uses the module's channel level too when it reports one. false: send
+  # at once, as before 0.6.0.
+  listen_before_talk: true
   # Home > Range test sends a probe this often.
   range_test_seconds: 30
   # M0/M1. Leave null: GPIO 22 and 27 belong to the Whisplay LCD, and

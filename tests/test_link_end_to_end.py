@@ -166,8 +166,11 @@ def test_a_dropped_fragment_degrades_into_a_gap_not_a_crash(monkeypatch):
 
 def test_duty_cycle_stops_a_flood(monkeypatch):
     port, _peer = FakeModule.pair()
+    # Listen before talk off: with it, each message waits for the one before
+    # to leave the air (~0.25 s), and 250 of them outlast the 20 s below. The
+    # governor is what is tested here; tests/test_lbt.py tests the waiting.
     link = LoraLink(make_radio(port, 1, monkeypatch), air_speed=9600,
-                    duty_cycle_percent=1.0)
+                    duty_cycle_percent=1.0, listen_before_talk=False)
     link.start()
     try:
         # 36 s of budget at ~0.25 s a packet is ~145 packets; queue well

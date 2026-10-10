@@ -49,6 +49,13 @@ REG_VOLATILE = 0xC2
 
 MAX_PACKET = 240
 
+# Ask the module for the channel's current signal level (register 0x00,
+# one byte), in normal mode. It answers C1 00 01 <level>, the level as
+# 256 - |dBm|. Needs the ambient-noise bit in REG1, which mFruit OS's radio
+# setup writes; the bundled tools/selftest.py reads it the same way.
+NOISE_QUERY = bytes([0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x01])
+NOISE_REPLY = bytes([0xC1, 0x00, 0x01])
+
 # A port that fails is reopened, but not more often than this.
 REOPEN_SECONDS = 2.0
 
@@ -267,6 +274,21 @@ class SX126x:
                 if not self._recover(ser, exc):
                     raise
                 self.ser.write(header + data)
+                self.ser.flush()
+
+    def query_noise(self):
+        """Ask for the channel's signal level. The answer arrives on the
+        receive side (``NOISE_REPLY`` and one byte), where the link picks it
+        out; nothing goes on the air."""
+        with self._tx_lock:
+            ser = self.ser
+            try:
+                ser.write(NOISE_QUERY)
+                ser.flush()
+            except (serial.SerialException, OSError) as exc:
+                if not self._recover(ser, exc):
+                    raise
+                self.ser.write(NOISE_QUERY)
                 self.ser.flush()
 
     # --- receive -------------------------------------------------------

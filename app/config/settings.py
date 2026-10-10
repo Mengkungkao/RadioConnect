@@ -38,6 +38,9 @@ class RadioSettings:
     # (shared/radio/radio.json); until then frequency and air rate are only
     # this file's guesses, and a radio set up elsewhere will not hear this one.
     provisioned: bool = False
+    # When mFruit OS's radio setup last wrote the module (radio.json): facts
+    # learnt about the module are remembered against it (Overrides).
+    provisioned_at: str = ""
     power_dbm: int = 22
     uart_baud: int = 9600
     # "auto": the band's rule once mFruit OS's radio setup recorded it (see
@@ -46,6 +49,9 @@ class RadioSettings:
     # Paired radios ping each other this often, to show which are in range
     # (about 0.16 s of airtime each at 9.6k). 0 turns it off.
     link_check_seconds: float = 120.0
+    # Listen before talk (app.radio.lbt): wait for a clear channel before
+    # each message, so two radios do not talk over each other.
+    listen_before_talk: bool = True
     # Home > Range test probes the other radio this often.
     range_test_seconds: float = 30.0
     # Pins the app should actively drive to select the module's mode.

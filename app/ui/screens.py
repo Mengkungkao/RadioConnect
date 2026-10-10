@@ -587,10 +587,14 @@ def draw_status(draw, state: ViewState):
         ]),
         ("Link", [
             ("peer", "connected" if state.target_linked else "not connected"),
-            ("rssi", (f"{state.last_rssi} dBm  ·  "
-                      f"{theme.SIGNAL_LABELS[theme.signal_level(state.last_rssi)]}")
-                     if state.last_rssi is not None else "nothing heard yet"),
-            ("duty", f"{state.duty_fraction * 100:.0f}% of the hour used"),
+            ("rssi", ((f"{state.last_rssi} dBm  ·  "
+                       f"{theme.SIGNAL_LABELS[theme.signal_level(state.last_rssi)]}")
+                      if state.last_rssi is not None else "nothing heard yet")
+                     + (f"  ·  noise {stats['noise']}" if stats.get("noise") is not None
+                        else "")),
+            ("duty", f"{state.duty_fraction * 100:.0f}% of the hour used"
+                     if not stats.get("waits") else
+                     f"{state.duty_fraction * 100:.0f}% used  ·  {stats['waits']}"),
             ("pkts", f"tx {stats.get('packets_tx', 0)}   "
                      f"rx {stats.get('packets_rx', 0)}   "
                      f"lost {stats.get('frames_dropped', 0)}"),

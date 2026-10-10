@@ -56,7 +56,9 @@ from dataclasses import dataclass, field
 from app.radio import crypto, protocol
 from app.radio.airtime import AirtimeBudget
 from app.radio.framing import SOF, Deframer, encode_frame
-from app.radio.sx126x import SX126x
+from app.radio.lbt import (JITTER_SECONDS, REPLY_FRAME_BYTES, REPLY_MARGIN, REPLY_TYPES,
+                           ChannelSense, NoiseFloor, expects_answer)
+from app.radio.sx126x import NOISE_REPLY, SX126x
 from app.utils.logger import get_logger
 
 log = get_logger("link")
@@ -96,6 +98,16 @@ RETRIEVE_ANSWERS_MAX = 3
 # dropped. Waiting shows as "pending" with a countdown in the app.
 MAX_AIRTIME_WAIT = 600.0
 
+# Listen before talk (app.radio.lbt). A message waits at most this long for
+# a clear channel, then goes anyway; a signal the module measures but that
+# nobody is heard sending (interference) holds it for at most the second.
+MAX_LISTEN_WAIT = 45.0
+MAX_SIGNAL_WAIT = 5.0
+# A signal on the channel: try again after a random wait up to this long.
+SIGNAL_BACKOFF = 0.5
+# How long the module takes to answer a signal-level query, at most.
+NOISE_WAIT = 0.15
+
 
 @dataclass
 class TxStatus:
@@ -104,7 +116,8 @@ class TxStatus:
     dst: int
     sent: int                    # packets already on the air
     total: int
-    waiting_until: float = 0.0   # monotonic: holding for airtime until then
+    waiting_until: float = 0.0   # monotonic: holding until then
+    why: str = "airtime"         # what it is holding for: "airtime" or "channel"
 
     @property
     def kind(self) -> str:
@@ -183,6 +196,11 @@ class Stats:
     retrieves_refused: int = 0
     late_rssi: int = 0
     last_rssi: int | None = None
+    noise_dbm: int | None = None         # the channel's level before our last message
+    noise_floor: int | None = None
+    lbt_waits: int = 0                   # messages that waited for a clear channel
+    lbt_wait_seconds: float = 0.0
+    lbt_forced: int = 0                  # sent anyway after the longest wait
     airtime_used: float = 0.0
     queue_depth: int = 0
     errors: list = field(default_factory=list)
@@ -196,7 +214,9 @@ class LoraLink:
     def __init__(self, radio: SX126x, air_speed: int = 9600,
                  duty_cycle_percent: float = 1.0, callsign: str = "",
                  addr: int | None = None, token: bytes | None = None,
-                 keyring=None, channel: int = protocol.DEFAULT_CHANNEL):
+                 keyring=None, channel: int = protocol.DEFAULT_CHANNEL,
+                 listen_before_talk: bool = True, noise_check: bool = False,
+                 noise_known: bool | None = None):
         self.radio = radio
         self.callsign = callsign
         self.addr = (radio.addr if addr is None else addr) & 0xFFFF
@@ -213,8 +233,24 @@ class LoraLink:
         self._deframer = Deframer()
         # One full fragment on the air, plus the pause the sender leaves.
         full_frame = len(encode_frame(bytes(protocol.HEADER_SIZE + protocol.MAX_BODY)))
-        self._reassembler = protocol.Reassembler(
-            fragment_seconds=self.budget.estimate(full_frame) + PACING_GUARD)
+        fragment_seconds = self.budget.estimate(full_frame) + PACING_GUARD
+        self._reassembler = protocol.Reassembler(fragment_seconds=fragment_seconds)
+        # Listen before talk: None turns it off. The module's signal level is
+        # used only if it answers (noise_supported). A module that does not
+        # know the query may send it as a few bytes on a wrong channel, so
+        # it is asked once, before the first message, and only when the app
+        # has not already learnt the answer (noise_known; on_noise_probed
+        # hands a new answer back to be remembered).
+        self.sense = (ChannelSense(fragment_seconds,
+                                   self.budget.estimate(REPLY_FRAME_BYTES) + REPLY_MARGIN)
+                      if listen_before_talk else None)
+        self.noise = NoiseFloor()
+        self.noise_supported = noise_known if (listen_before_talk and noise_check) else False
+        self.on_noise_probed = None
+        self._noise_wanted = False
+        self._noise_reading = None
+        self._noise_answered = threading.Event()
+        self._channel_news = threading.Event()   # wakes a message waiting for the channel
         self._reassembly = threading.Condition()
         # msg_id -> [sent_at, dst, packets, {seq: (resends, last_at)}]
         self._sent = {}
@@ -303,10 +339,16 @@ class LoraLink:
             thread.start()
             self._threads.append(thread)
         log.info("link up (callsign %r, addr %d)", self.callsign, self.addr)
+        if self.sense is None:
+            log.info("listen before talk: off")
+        elif self.noise_supported is not None:
+            log.info("listen before talk: on; channel level %s", "from the module"
+                     if self.noise_supported else "not reported by this module")
 
     def stop(self):
         self._running.clear()
         self._tx.put(None)          # unblock the tx thread
+        self._channel_news.set()    # and a message waiting for the channel
         self.radio.wake_reader()    # unblock the rx thread
         with self._reassembly:
             self._reassembly.notify_all()
@@ -323,6 +365,11 @@ class LoraLink:
                     time.sleep(0.2)  # port hiccup: back off rather than spin
                 continue
             self.stats.bytes_rx += len(data)
+            data = self._take_noise_answer(data)
+            if self.sense is not None and data:
+                self.sense.bytes_arrived()
+            if not data:
+                continue
             self._watch_for_config_mode(data)
             for payload, rssi_byte in self._frames(data):
                 self._handle_payload(payload, rssi_byte)
@@ -349,6 +396,7 @@ class LoraLink:
             return frames
         read_pending = getattr(self.radio, "read_pending", None)
         late = read_pending(RSSI_WAIT) if read_pending else b""
+        late = self._take_noise_answer(late)
         if not late:
             return frames
         self.stats.bytes_rx += len(late)
@@ -359,6 +407,127 @@ class LoraLink:
             self.stats.late_rssi += 1
             late = late[1:]
         return frames + (self._deframer.feed(late) if late else [])
+
+    def _take_noise_answer(self, data: bytes) -> bytes:
+        """Pick the module's answer to a signal-level query out of ``data``.
+
+        Only while a query is out. The answer cannot be mistaken for a
+        packet: inside a frame 0x00 only ends it, and what follows a frame
+        is a start-of-frame or an RSSI byte, never 0x01.
+        """
+        if not self._noise_wanted or not data:
+            return data
+        read_pending = getattr(self.radio, "read_pending", None)
+        for _ in range(3):
+            index = data.find(NOISE_REPLY)
+            if index >= 0 and len(data) > index + len(NOISE_REPLY):
+                value = data[index + len(NOISE_REPLY)]
+                self._noise_reading = -(256 - value)
+                self._noise_wanted = False
+                self._noise_answered.set()
+                return data[:index] + data[index + len(NOISE_REPLY) + 1:]
+            # Its first bytes, with the rest a few milliseconds behind them.
+            tail = data[index:] if index >= 0 else b""
+            if not tail:
+                tail = next((NOISE_REPLY[:k] for k in (2, 1)
+                             if data.endswith(NOISE_REPLY[:k])), b"")
+            if not tail or read_pending is None:
+                return data
+            more = read_pending(0.05)
+            if not more:
+                return data
+            data += more
+        return data
+
+    def _measure_noise(self, wait: float = NOISE_WAIT):
+        """The channel's signal level in dBm, or None if the module did not say."""
+        query = getattr(self.radio, "query_noise", None)
+        if query is None:
+            return None
+        self._noise_answered.clear()
+        self._noise_reading = None
+        self._noise_wanted = True
+        try:
+            query()
+        except Exception:
+            log.debug("signal-level query failed", exc_info=True)
+            self._noise_wanted = False
+            return None
+        answered = self._noise_answered.wait(wait)
+        self._noise_wanted = False
+        return self._noise_reading if answered else None
+
+    def _probe_noise(self):
+        """Once, before the first message: does the module report the level?"""
+        reading = self._measure_noise(0.5)
+        self.noise_supported = reading is not None
+        if reading is not None:
+            self.noise.busy(reading)
+            self.stats.noise_dbm = reading
+            self.stats.noise_floor = self.noise.floor
+            log.info("listen before talk: on; the module reports the channel's "
+                     "level (%d dBm now)", reading)
+        else:
+            log.info("listen before talk: on; the module does not report the "
+                     "channel's level, so only what is heard counts (not asked again "
+                     "until the radio is set up again)")
+        if self.on_noise_probed is not None:
+            try:
+                self.on_noise_probed(self.noise_supported)
+            except Exception:
+                log.warning("could not remember whether the module reports the level",
+                            exc_info=True)
+
+    def _listen_before_talk(self, label: str, dst: int, total: int, answering: bool):
+        """Wait until the channel is clear, within MAX_LISTEN_WAIT."""
+        start = time.monotonic()
+        jittered = False
+        others = False           # waited for another radio, not just our own packet
+        signal_since = None
+        why = ""
+        while self._running.is_set():
+            self._channel_news.clear()       # before looking, so no news is missed
+            now = time.monotonic()
+            until, reason = self.sense.busy(now, answering=answering)
+            if until <= now and self.noise_supported:
+                level = self._measure_noise()
+                if level is not None:
+                    busy = self.noise.busy(level)
+                    self.stats.noise_dbm = level
+                    self.stats.noise_floor = self.noise.floor
+                    if busy:
+                        signal_since = signal_since or now
+                        if now - signal_since < MAX_SIGNAL_WAIT:
+                            until = now + SIGNAL_BACKOFF * (0.5 + random.random())
+                            reason = f"a signal on the channel ({level} dBm)"
+                    else:
+                        signal_since = None
+            if until > now:
+                jittered = False
+                others = others or reason != "our last packet is on the air"
+            elif others and not answering and not jittered:
+                # Others were waiting too: do not all start at once.
+                jittered = True
+                until, reason = now + random.random() * JITTER_SECONDS, "taking turns"
+            else:
+                break
+            if now - start >= MAX_LISTEN_WAIT:
+                self.stats.lbt_forced += 1
+                log.warning("%s: channel still busy after %.0f s (%s); sending anyway",
+                            label, now - start, why)
+                break
+            until = min(until, start + MAX_LISTEN_WAIT)
+            if reason != "taking turns":
+                why = reason
+            # Only a wait for another radio shows as "channel busy".
+            self.sending = TxStatus(label, dst, 0, total, until if others else 0.0,
+                                    why="channel")
+            self._channel_news.wait(max(0.0, until - now))
+        if others:
+            held = time.monotonic() - start
+            self.stats.lbt_waits += 1
+            self.stats.lbt_wait_seconds += held
+            log.info("listened before talking: %s held %.1f s (%s)", label, held, why)
 
     def _watch_for_config_mode(self, data: bytes):
         """Count FF FF FF: what a module in configuration mode says.
@@ -389,6 +558,12 @@ class LoraLink:
         if packet is None:
             self.stats.frames_dropped += 1
             return
+        if self.sense is not None and packet.src != self.addr:
+            # Whoever it is for, and on whichever privacy channel: it is on
+            # this frequency, so it decides when we may talk.
+            self.sense.heard(packet.src, packet.dst, packet.type, packet.seq,
+                             packet.total, self.addr)
+            self._channel_news.set()
         if packet.channel != self.channel and packet.type not in protocol.PAIRING_TYPES:
             # Somebody else's conversation on the same frequency.
             self.stats.other_channel += 1
@@ -911,6 +1086,8 @@ class LoraLink:
     def _tx_loop(self):
         while self._running.is_set():
             item = self._tx.get()
+            if item is not None and self.noise_supported is None:
+                self._probe_noise()
             if item is None:
                 return
             dst, packets, label, report = item
@@ -919,6 +1096,10 @@ class LoraLink:
 
     def _transmit(self, dst: int, packets: list, label: str, report: bool = True):
         total = len(packets)
+        type_ = packets[0][0] & 0xF if packets and packets[0] else None
+        # Answers go first: they do not wait for answers to our own requests,
+        # nor take a random turn. Fragments resent on request are answers too.
+        answering = type_ in REPLY_TYPES or label.startswith("resend/")
         for index, packet in enumerate(packets):
             if not self._running.is_set():
                 self.sending = None
@@ -941,6 +1122,11 @@ class LoraLink:
                 # The app shows this as "pending" with a countdown.
                 self.sending = TxStatus(label, dst, index, total, time.monotonic() + wait)
                 time.sleep(wait)
+            if index == 0 and self.sense is not None:
+                self._listen_before_talk(label, dst, total, answering)
+                if not self._running.is_set():
+                    self.sending = None
+                    return
             self.sending = TxStatus(label, dst, index, total)
 
             try:
@@ -955,6 +1141,8 @@ class LoraLink:
                 return
 
             airtime = self.budget.record(len(frame))
+            if self.sense is not None:
+                self.sense.transmitted(airtime)
             self.stats.airtime_used = self.budget.used_seconds()
             self.stats.packets_tx += 1
             self.stats.bytes_tx += len(frame)
@@ -971,6 +1159,8 @@ class LoraLink:
 
         log.info("sent %s: %d packet(s) to %s", label, total,
                  "all" if dst == protocol.BROADCAST else dst)
+        if self.sense is not None and not answering and expects_answer(type_, dst):
+            self.sense.expect_answer(dst)
         self.sending = None
         self._report_sent(label, True)
 

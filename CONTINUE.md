@@ -24,6 +24,7 @@ into one app, following mFruit OS's app integration rules
 | U2 | Unpair (user) | DONE 0.3.2: Settings › Paired radios, hold → confirm; removes keys (shared), contact, shared name; target falls back to Everyone. Pi: stale 6235 unpaired on the device |
 | U3 | User: long voice "duty cycle full", Orange Pi slow, sender names | DONE 0.4.0: duty cycle by band (eu868 1%, au915/us915 10%; config.yaml `auto`); codec by air rate (1600 at 2.4k; was 3200 = 1.6x slower than speech); messages wait up to 10 min for airtime instead of being refused; floating pill pending/sending on every screen and "pending" on the talking disc; sender name on received bubbles; config.yaml no longer persisted (so `auto` reaches existing installs; device settings are in data/). Installed on both: codec2=1600. NOT verified on device: a >7 s message end to end (needs a person to hold the button) |
 | B1 | Listen in background (user, 2026-10-04): Settings switch; leaving releases the screen and keeps listening; mFruit OS SDK 1.4.0 `background` sets Keep running + Keep screen bright (the backlight pin is the radio's M0: dimming deafens it, measured 0/20 vs 40/40) | DONE 0.5.0: 5 new tests (negative control), settings-row tests updated, 680 pass; preview checked. DEVICE (Pi, 2026-10-04): switch on, leave, a quick reply from the Orange Pi received and acknowledged in the background 8 min later (✓✓), reopened the same process, switch off (mFruit OS record 2026-10-04-radio-over-the-air). Committed and pushed as `29694c4`; the mFruit OS Fruit Store list pins 0.5.0 since 2026-10-05 |
+| L2 | Listen before talk (user, 2026-10-10). Evidence: Orange Pi log 15:08:05, a pong sent while the Pi's voice message 214 was on the air, fragments 0 and 1 lost | DONE 0.6.0, uncommitted: `app/radio/lbt.py` `ChannelSense` (other radios' messages in progress from every header, room for an answer after a request, bytes arriving, our own packet on the air) and `NoiseFloor`; link waits before each message's first packet (answers go first, random turn after a busy channel, max 45 s, unexplained signal max 5 s); module channel level via `C0 C1 C2 C3 00 01` asked **once per radio setup** and remembered in `data/settings.json` `module` (a module that does not know the query might send it as bytes on a wrong channel); pill *pending · channel busy*; Status shows noise and waits; `radio.listen_before_talk` in config.yaml. Tests: `tests/test_lbt.py` 18 on a new airtime/collision fake (`tests/fakes.py` `Air`), each collision scenario with a negative control (LBT off collides), 5 repeat runs green; 699 pass. DEVICE (Orange Pi, 0.6.0 sideloaded 15:55): runs, hello/hello-ack and pings with the Pi still work; its module **did not answer** the level query (inside the app, and from a probe script with the app closed), so it uses heard traffic only; answer remembered, not asked after a restart. NOT verified: two radios contending (the Pi runs 0.5.0 and was unreachable), a module that reports the level. The probe script and the first build wrote about 100 level queries to the Orange Pi's module; if the module took them as data they went out as 3-byte packets to address 0xC0C1 on channel 194 (outside 0–80). Unknown whether anything was sent |
 | R2 | SOS on protocol v3: one new type (0xF, the last free one) with a subtype byte (SOS, I'm OK); repeated until acknowledged, alarm, countdown; port Messenger's `emergency.py` logic and screens | TODO |
 | R3 | Home: Talk · Chats · SOS · Pair · Settings · Status; footer hints from the one navigation table | TODO |
 | R4 | Tests: controls through the real InputController, every screen inside the chrome, SOS and chat flows | TODO |
@@ -46,6 +47,14 @@ into one app, following mFruit OS's app integration rules
 
 ## Not done / not verified
 
+- Battery shown as charging on battery (user, 2026-10-10): RadioConnect only
+  displays `get battery_charging` from the PiSugar socket. The fault was in
+  mFruit OS's power service (voltage noise judged as charging on a four-LED
+  PiSugar 2) and is fixed there, uncommitted (mFruit OS record
+  `2026-10-10-battery-charging-judgement.md`). No RadioConnect change needed.
+- 0.6.0 reaches devices through the Fruit Store only after a commit, push and
+  a new `ref`/`sha256`/`version` in mFruit OS `config/catalog.json`; the Pi
+  still runs 0.5.0.
 - GitHub repository: `origin`, `main` pushed through 0.5.0 (`29694c4`). No tags
   or GitHub releases: versions reach devices through the Fruit Store list.
   Logger names and the lock file are `radioconnect` now.

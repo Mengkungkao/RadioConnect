@@ -9,8 +9,8 @@ uses WalkieTalkie's radio protocol (version 3), so it works with radios still
 running WalkieTalkie. Radios running the old Messenger use a different
 protocol and need RadioConnect to talk to it.
 
-> **Status: 0.5.0, in development.** Talk, Chats, pairing and unpairing,
-> listening in the background.
+> **Status: 0.6.0, in development.** Talk, Chats, pairing and unpairing,
+> listening in the background, listen before talk.
 > SOS is next ([CONTINUE.md](CONTINUE.md)). It is not a certified emergency
 > service.
 
@@ -83,6 +83,33 @@ packet heard at 80% or 15%, all at 100%). The switch turns on both of mFruit
 OS's *Keep running* and *Keep screen bright* for RadioConnect, which you also
 find in **mFruit OS Settings → Apps → RadioConnect**. To stop listening, turn
 the switch off, or stop the app there.
+
+## Listen before talk
+
+A radio cannot hear while it transmits, and two radios that transmit at once
+usually both lose what they sent. So before each message RadioConnect waits
+for a clear channel:
+
+- **Another radio's message in progress.** Every packet says "fragment 2 of
+  6", even one for somebody else, so the rest of that message is waited out.
+- **Room to answer.** After a text, voice message, ping or call to one radio,
+  that radio answers at once (✓✓, a pong). Every other radio, the sender
+  included, leaves it time to do so. Answers themselves go first.
+- **The channel's level,** when the radio module reports it (the E22 in the
+  Waveshare HAT does, once mFruit OS's radio setup has run). This catches the
+  first fragment of a message, before any of it has arrived.
+
+After a busy channel a message waits a further random moment, so radios that
+were all waiting do not start together. A message waits at most 45 s; an
+unexplained signal holds it for at most 5 s. While a text or voice message
+waits, the pill says **pending: … · channel busy**. **Status** shows the
+channel's level (*noise*, in dBm) next to the last signal heard, and how many
+messages waited.
+
+It changes nothing on the air, so it works with every radio. Radios that do
+not have it (WalkieTalkie, RadioConnect before 0.6.0) do not wait for you.
+To turn it off, set `listen_before_talk: false` under `radio:` in
+`config.yaml`.
 
 ## Chats
 
