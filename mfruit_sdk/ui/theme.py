@@ -1,4 +1,4 @@
-"""MFruit OS visual tokens and screen geometry (the same values the launcher uses)."""
+"""mFruit OS visual tokens and screen geometry (the same values the launcher uses)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ SCREEN_H = 280
 CORNER_INSET = 20
 MARGIN = 14
 
-# Screen layout shared by every MFruit screen.
+# Screen layout shared by every mFruit screen.
 STATUS_Y = 9            # status bar text top: page name left, WiFi + battery right
 CONTENT_TOP = 40        # first pixel below the status bar
 CONTENT_BOTTOM = 248    # last pixel above the footer

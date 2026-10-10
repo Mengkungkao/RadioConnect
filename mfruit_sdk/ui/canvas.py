@@ -1,4 +1,4 @@
-"""A 240x280 frame with cached text and the MFruit drawing primitives.
+"""A 240x280 frame with cached text and the mFruit drawing primitives.
 
 ``Canvas.image`` / ``Canvas.draw`` are an ordinary PIL image and ImageDraw,
 so an app draws its own content with Pillow as before and uses the canvas

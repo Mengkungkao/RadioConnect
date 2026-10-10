@@ -1,4 +1,4 @@
-"""WiFi level and battery for the status bar, read the way MFruit OS reads them.
+"""WiFi level and battery for the status bar, read the way mFruit OS reads them.
 
     wifi_level()     0..3, 0 = not connected, None = no wireless interface
     read_battery()   (percent or None, charging) from pisugar-server

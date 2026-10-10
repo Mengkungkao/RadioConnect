@@ -1,4 +1,4 @@
-"""A managed app must leave MFruit OS's launch wrapper registered."""
+"""A managed app must leave mFruit OS's launch wrapper registered."""
 
 from types import SimpleNamespace
 

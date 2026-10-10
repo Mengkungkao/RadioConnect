@@ -1,13 +1,13 @@
-# MFruit OS app contract
+# mFruit OS app contract
 
-Contract version: MFruit OS 1.4 with MFruit App SDK 1.2.0.
+Contract version: mFruit OS 1.4 with mFruit App SDK 1.2.0.
 
-This app runs on **MFruit OS**: a 240×280 LCD with rounded corners, one
+This app runs on **mFruit OS**: a 240×280 LCD with rounded corners, one
 button, an RGB LED, and optionally a USB or Bluetooth keyboard, on a
 Raspberry Pi Zero 2 W or Orange Pi Zero 2W. whisplay-daemon owns the
-hardware; MFruit OS launches the app and takes the screen back when it
+hardware; mFruit OS launches the app and takes the screen back when it
 leaves. Every app must feel like part of the same device. These rules are
-the contract; the MFruit App SDK (`mfruit_sdk/`, vendored) implements it.
+the contract; the mFruit App SDK (`mfruit_sdk/`, vendored) implements it.
 
 Source of truth: `MFruitOS/docs/apps/APP_CONTRACT.md`. Each app carries a
 byte-identical copy at `.claude/rules/mfruit-os-app.md`
@@ -18,14 +18,14 @@ Details are in `MFruitOS/docs/apps/`: `GETTING_STARTED.md`, `MANIFEST.md`,
 `SDK.md`, `UI_GUIDELINES.md`, `PACKAGING.md`, `TESTING.md`, `PUBLISHING.md`
 and `MIGRATING_EXISTING_APP.md`. Platform rules are in
 `MFruitOS/docs/platform/DEVELOPMENT_RULES.md`. Current SDK apps declare
-MFruit OS **1.4.0 or newer** in their native package manifest.
+mFruit OS **1.4.0 or newer** in their native package manifest.
 
 ## 1. Input: one controller, the same controls everywhere
 
 - All input goes through `mfruit_sdk.input.InputController`. Never read the
   button edges or `/dev/input` yourself and never write another gesture
   detector: two interpreters of one button is how apps drift apart.
-- The controls, in every app and in MFruit OS itself:
+- The controls, in every app and in mFruit OS itself:
 
   | Action | Button | Keyboard |
   |---|---|---|
@@ -38,7 +38,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
   | type | — | letters, digits, Backspace (only where a screen takes text) |
 
 - **Menus and lists** use exactly: tap next · 2× previous · hold open ·
-  4× back. A hold only *arms* at the threshold — MFruit OS's long press,
+  4× back. A hold only *arms* at the threshold — mFruit OS's long press,
   `long_press_ms=700` — (`on_armed(True)`: show "release to …") and acts on
   release, never while the button is down.
 - **Back from the app's first screen leaves the app** (4× or Esc). Show a
@@ -54,7 +54,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
 - **Act only while the app owns the screen.** Pass
   `active=lambda: board.foreground_ready` and call `controller.reset()` when
   focus is revoked. Pass `app_id=APP_ID` to the controller (or inherit
-  `WHISPLAY_APP_ID` from mfruit-run). MFruit OS exclusively grabs keyboards
+  `WHISPLAY_APP_ID` from mfruit-run). mFruit OS exclusively grabs keyboards
   and forwards keys through its key hub; direct `/dev/input` readers receive
   nothing while it runs. SDK 1.2.0 uses the hub and falls back to evdev only
   without a reachable hub. The controller ignores keys that went down while
@@ -82,14 +82,14 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
 - The existing Node chatbot retains `exit_gesture: "quad_click"` under the
   compatibility exception above. Track that exception explicitly when
   assessing native package readiness.
-- Preserve MFruit OS's managed `mfruit-run` launch command. A native or
+- Preserve mFruit OS's managed `mfruit-run` launch command. A native or
   adopted app must not replace it with its standalone command at startup
-  or during an install hook. Let MFruit OS own managed registration and
+  or during an install hook. Let mFruit OS own managed registration and
   autostart; keep standalone setup separate.
-- Draw the first frame as soon as possible: MFruit OS shows "Opening <App>"
+- Draw the first frame as soon as possible: mFruit OS shows "Opening <App>"
   until the app's first frame.
 - On `app_exit_requested`, stop within 3 seconds. When the user leaves, exit
-  completely — MFruit OS stops the process group 3 s later — unless the
+  completely — mFruit OS stops the process group 3 s later — unless the
   manifest sets `"background": true` or the user (or the app, through
   `mfruit_sdk.background`) turned on *Keep running* (the app must keep
   receiving, e.g. messages); a background app releases the screen and stays
@@ -106,7 +106,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
   on `app_focus_revoked` stop drawing.
 - Never call `app.register` with a `launch_command` (it would replace the
   `mfruit-run` gate) and never start other apps with `app.launch`: while
-  MFruit OS runs, only it can authorize a start, and other starts are denied
+  mFruit OS runs, only it can authorize a start, and other starts are denied
   in `~/.whisplay-os/logs/launch-gate.log`.
 
 ## 3. Screen layout and look
@@ -121,8 +121,8 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
 - Lists use `mfruit_sdk.ui.draw_list` rows (or the same geometry); toasts use
   `toast()`; empty and error states use `message()`.
 - Colours from `mfruit_sdk.ui.theme.DARK`; fonts from `mfruit_sdk.ui.fonts`
-  (Inter from MFruit OS, DejaVu elsewhere). An app may keep one brand accent
-  inside its content (e.g. Bitcoin orange); chrome stays MFruit.
+  (Inter from mFruit OS, DejaVu elsewhere). An app may keep one brand accent
+  inside its content (e.g. Bitcoin orange); chrome stays mFruit.
 - Sentence case for words on screen ("Refreshing…", "Network error"), not
   ALL CAPS. Hint labels: `tap`, `2×`, `3×`, `4×`, `hold`, `release`.
 - Render only when something changed; convert with
@@ -131,7 +131,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
 ## 4. The vendored SDK
 
 - `mfruit_sdk/` is a copy of `MFruitOS/mfruitos/sdk`. Do not edit it in the
-  app. Change it in MFruit OS (with its tests), then run
+  app. Change it in mFruit OS (with its tests), then run
   `MFruitOS/scripts/sdk-sync.sh <dir containing mfruit_sdk>`;
   `sdk-sync.sh <dir> --check` reports a stale copy.
 - The SDK imports only itself, the standard library and Pillow (UI only),
@@ -156,7 +156,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
   manifest, daemon registration and `InputController(app_id=...)`.
 - [ ] Use one owner for hardware: whisplay-daemon. Subscribe to its events
   and use its shared framebuffer; do not create a second GPIO, display or
-  keyboard owner while MFruit OS runs.
+  keyboard owner while mFruit OS runs.
 - [ ] Separate app state, actions and drawing. Keep imports free of device
   operations so a smoke test can import and render without taking focus.
   Keep slow network, radio and model work away from the input/render path.
@@ -185,7 +185,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
 - [ ] Include the actual entrypoint, required assets, vendored SDK and this
   rules file. Shell entrypoints and hooks use LF endings, a valid shebang
   and executable permissions. Use `exec` for the final app process so
-  shutdown and exit status reach MFruit OS correctly.
+  shutdown and exit status reach mFruit OS correctly.
 - [ ] Make installation repeatable and noninteractive. `install.sh`, when
   needed, runs on initial install, reinstall, update and downgrade. Check
   prerequisites with clear errors; never require an interactive `sudo`
@@ -195,7 +195,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
 - [ ] Declare a fast, deterministic `test` hook that imports the app and
   checks essential local behaviour. It must not claim the display, send
   messages, transmit radio audio or require network credentials. A failure
-  must exit nonzero so MFruit OS can retain the previous version.
+  must exit nonzero so mFruit OS can retain the previous version.
 - [ ] Supply `update.sh` only for necessary migrations; handle upgrades and
   downgrades without losing user data. Use `persist` only for intended
   user-managed paths. If installation changes anything outside the app
@@ -238,7 +238,7 @@ MFruit OS **1.4.0 or newer** in their native package manifest.
   Mark untested checks as untested, and distinguish app failures from absent
   hardware, credentials or services.
 
-An app adopted from whisplay-daemon's registry can run under MFruit OS
+An app adopted from whisplay-daemon's registry can run under mFruit OS
 without being a complete native release package. A draft manifest under
 `contrib/manifests/` is not a replacement for the app's own package,
 dependency installation/build steps and smoke test. Do not describe an app

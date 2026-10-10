@@ -25,7 +25,7 @@ radio:
   power_dbm: 22
   uart_baud: 9600
   # Share of each hour this radio may transmit. auto: the band's rule from
-  # MFruit OS's radio setup -- 1% for EU 868 (the legal cap, 36 s an hour),
+  # mFruit OS's radio setup -- 1% for EU 868 (the legal cap, 36 s an hour),
   # 10% for AU915 and US915 (no legal hourly cap; 10% shares the channel).
   duty_cycle_percent: auto
   # Paired radios ping each other this often so each shows whether the
@@ -80,7 +80,7 @@ input:
   # Push-to-talk opens the mic this long after the press (talk screens).
   hold_ms: 350
   # Elsewhere a hold opens the highlighted row after this long, and acts
-  # on release -- MFruit OS's own long press, so menus feel the same.
+  # on release -- mFruit OS's own long press, so menus feel the same.
   long_press_ms: 700
 
 power:

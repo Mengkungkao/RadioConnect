@@ -1,7 +1,7 @@
 """One-button (and keyboard) editors.
 
 Every value in Settings is entered with a single button or a keyboard, so
-each editor is a small state machine driven by MFruit OS input actions:
+each editor is a small state machine driven by mFruit OS input actions:
 tap = next value, hold = commit, 4 clicks = cancel. They hold all their own
 state and touch no hardware, which is what makes Settings testable at
 all.

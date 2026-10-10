@@ -1,12 +1,12 @@
-"""USB and Bluetooth keyboards, from /dev/input/event* or MFruit OS's key hub.
+"""USB and Bluetooth keyboards, from /dev/input/event* or mFruit OS's key hub.
 
-**While MFruit OS runs it holds every keyboard exclusively** (EVIOCGRAB,
+**While mFruit OS runs it holds every keyboard exclusively** (EVIOCGRAB,
 ``grab=True``) and passes each key to the program that owns the screen,
 through its key hub (``state/keys.sock``): itself, or the foreground app.
 Without that, every key also reaches the Linux console -- on a board whose
 console logs a shell in automatically, typing into an app typed into that
-shell too (it restarted MFruit OS from the shell's history). An app's
-reader (``app_id=...``) connects to the hub by itself when MFruit OS runs,
+shell too (it restarted mFruit OS from the shell's history). An app's
+reader (``app_id=...``) connects to the hub by itself when mFruit OS runs,
 and reads the devices directly when it does not.
 
 whisplay-daemon hands keys only to its own pages (and closes an external
@@ -215,9 +215,9 @@ class DeviceWatch:
 
 
 def hub_socket_path() -> Optional[str]:
-    """MFruit OS's key hub, if MFruit OS is running on this board.
+    """mFruit OS's key hub, if mFruit OS is running on this board.
 
-    While it runs, MFruit OS holds every keyboard exclusively (so the Linux
+    While it runs, mFruit OS holds every keyboard exclusively (so the Linux
     console, the daemon and stray readers get nothing) and hands each key
     to the program that owns the screen, through this socket.
     """
@@ -233,9 +233,9 @@ def hub_socket_path() -> Optional[str]:
 class KeyReader:
     """Reads the keyboards on its own thread; calls ``on_event(KeyEvent)``.
 
-    With ``app_id`` (an app): while MFruit OS runs, keys come from its key
+    With ``app_id`` (an app): while mFruit OS runs, keys come from its key
     hub -- only while this app owns the screen -- otherwise straight from
-    the devices. MFruit OS itself reads the devices with ``grab=True``.
+    the devices. mFruit OS itself reads the devices with ``grab=True``.
     ``on_devices(list)`` is called when the set of keyboards changes.
     """
 
@@ -249,7 +249,7 @@ class KeyReader:
         self.rescan = rescan_seconds
         self.grab = grab
         self.app_id = app_id
-        # None: find MFruit OS's hub when there is an app_id; False: never;
+        # None: find mFruit OS's hub when there is an app_id; False: never;
         # a path: that socket.
         self.hub = hub
         self.on_devices = on_devices
@@ -359,13 +359,13 @@ class KeyReader:
             while not self._stop.is_set():
                 path = self._hub_path()
                 if path and self._run_hub(path):
-                    continue            # the hub went away (MFruit OS restarting): look again
+                    continue            # the hub went away (mFruit OS restarting): look again
                 self._run_direct()
         finally:
             self._hub_devices = None
 
     def _run_direct(self):
-        """Read the devices until stop() -- or, for an app, until MFruit OS's hub appears."""
+        """Read the devices until stop() -- or, for an app, until mFruit OS's hub appears."""
         wake = self._wake[0]
         watch = DeviceWatch.open(self.input_dir)
         hub_dir = None
@@ -384,7 +384,7 @@ class KeyReader:
                     self._report_devices()
                     rescan = False
                     if self._hub_path() and self._hub_reachable():
-                        return          # MFruit OS is running: take keys from it
+                        return          # mFruit OS is running: take keys from it
                 # Wait for keys, for stop(), for a device to come or go --
                 # or, without inotify, for the next look round.
                 fds = list(self._open) + [wake] + [w.fd for w in (watch, hub_watch) if w]
@@ -432,7 +432,7 @@ class KeyReader:
             return False                 # a socket left behind by a crash
 
     def _run_hub(self, path: str) -> bool:
-        """Take keys from MFruit OS's hub until it goes away. False: could not connect."""
+        """Take keys from mFruit OS's hub until it goes away. False: could not connect."""
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(3.0)
@@ -442,7 +442,7 @@ class KeyReader:
         except OSError as exc:
             log.debug("key hub %s not reachable: %s", path, exc)
             return False
-        log.info("keyboard through MFruit OS (%s)", path)
+        log.info("keyboard through mFruit OS (%s)", path)
         self._hub_devices = []
         held = {}                        # code -> name: named keys down, via the hub
         wake = self._wake[0]
@@ -454,7 +454,7 @@ class KeyReader:
                     break
                 data = sock.recv(4096)
                 if not data:
-                    break                # MFruit OS stopped
+                    break                # mFruit OS stopped
                 buffer += data
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)

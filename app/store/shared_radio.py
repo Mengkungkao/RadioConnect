@@ -1,7 +1,7 @@
-"""This radio's identity, keys and paired contacts, shared with every MFruit
+"""This radio's identity, keys and paired contacts, shared with every mFruit
 OS radio app (the Messenger, ...) through the SDK's shared radio store.
 
-MFruit OS keeps them once per device (``~/.whisplay-os/shared/radio``), so a
+mFruit OS keeps them once per device (``~/.whisplay-os/shared/radio``), so a
 radio paired here is paired in the Messenger too, and the other way round.
 On first use our own files are handed over -- the Device ID in settings.json
 and keys.json -- and never changed or removed; radios already paired with
@@ -50,7 +50,7 @@ def sync_identity(settings, overrides) -> bool:
                     settings.radio.address, device.address)
         overrides.set("radio", "address", device.address)
         settings.radio.address = device.address
-    # The settings MFruit OS's radio setup wrote into the module are the ones
+    # The settings mFruit OS's radio setup wrote into the module are the ones
     # it actually holds: pace packets and count airtime by them.
     provisioned = shared.load_radio()
     from app.config.settings import radio_defaults
@@ -62,7 +62,7 @@ def sync_identity(settings, overrides) -> bool:
         radio_defaults(settings, getattr(provisioned, "band", None))
     else:
         radio_defaults(settings)
-        log.warning("the radio is not set up by MFruit OS (no radio.json): assuming "
+        log.warning("the radio is not set up by mFruit OS (no radio.json): assuming "
                     "%s MHz at %s bps from config.yaml; radios set up with "
                     "setup-radio.sh will not hear this one",
                     settings.radio.frequency_mhz, settings.radio.air_speed)

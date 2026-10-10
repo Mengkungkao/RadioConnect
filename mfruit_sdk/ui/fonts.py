@@ -1,12 +1,12 @@
-"""MFruit OS's fonts (Inter) with the DejaVu fallback, and a text raster cache.
+"""mFruit OS's fonts (Inter) with the DejaVu fallback, and a text raster cache.
 
-Inter ships with MFruit OS (SIL OFL), so an app on a board with MFruit OS
+Inter ships with mFruit OS (SIL OFL), so an app on a board with mFruit OS
 installed looks exactly like the launcher; elsewhere DejaVu (installed with
 whisplay-daemon's dependencies) is used. Search order:
 
     $MFRUIT_FONT_DIR
     <this package>/fonts                       an app may vendor Inter here
-    <MFruit OS source>/assets/fonts            when the SDK runs inside MFruit OS
+    <mFruit OS source>/assets/fonts            when the SDK runs inside mFruit OS
     $MFRUIT_HOME/system/current/assets/fonts   exported by mfruit-run
     ~/.whisplay-os/system/current/assets/fonts
     /home/*/.whisplay-os/system/current/assets/fonts   (apps started as another user)

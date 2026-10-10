@@ -5,7 +5,7 @@ machine driven by input actions, with no state anywhere else. They are
 plain objects with no display or hardware dependency, which is what lets
 the whole of Settings be tested without a Pi.
 
-The actions are MFruit OS's (mfruit_sdk.input), so nothing has to be
+The actions are mFruit OS's (mfruit_sdk.input), so nothing has to be
 relearned inside an editor:
 
     tap / Down       change the thing under the cursor (next digit value, choice)

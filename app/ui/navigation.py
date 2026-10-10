@@ -7,7 +7,7 @@ had been written separately, so they were free to disagree. Here they
 cannot: `route()` drives the handler and `hints()` renders the footer,
 both from `SCREEN_ACTIONS`.
 
-The actions are MFruit OS's (mfruit_sdk.input), the same in every MFruit
+The actions are mFruit OS's (mfruit_sdk.input), the same in every mFruit
 app, so nothing is relearned between apps:
 
     next      tap              Down / Right / Tab

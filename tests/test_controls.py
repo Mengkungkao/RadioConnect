@@ -1,7 +1,7 @@
-"""The button and a keyboard, end to end, through MFruit OS's controller.
+"""The button and a keyboard, end to end, through mFruit OS's controller.
 
 mfruit_sdk.input.InputController is the one interpreter of the button and
-the keyboard in every MFruit app. These tests drive the real controller --
+the keyboard in every mFruit app. These tests drive the real controller --
 no threads, a fake clock -- into the real WalkieApp handlers, so what is
 checked is what an operator's thumb and keys actually do.
 """
@@ -115,7 +115,7 @@ def test_a_hold_on_a_dark_talk_screen_only_wakes_it(wired, monkeypatch):
 
 
 def test_talking_starts_promptly_but_opening_is_a_deliberate_hold(wired):
-    """350 ms opens the mic on a talk screen; a menu row needs MFruit OS's 700 ms."""
+    """350 ms opens the mic on a talk screen; a menu row needs mFruit OS's 700 ms."""
     wired.input.press()
     step(wired, 0.4)
     assert not wired.state.armed and wired.state.screen == HOME

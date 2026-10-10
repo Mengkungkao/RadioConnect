@@ -3,8 +3,8 @@
 The inbox screen used to print "2 clicks back" while routing two clicks
 to *play*, which returned silently when there was nothing to play. On an
 empty inbox that left no advertised way out. These tests pin the
-invariants that prevent it recurring, now in MFruit OS's terms (the same
-controls in every MFruit app):
+invariants that prevent it recurring, now in mFruit OS's terms (the same
+controls in every mFruit app):
 
     tap next · 2 clicks previous · hold open · 4 clicks back
     on talk screens a hold talks, and 3 clicks opens
@@ -26,7 +26,7 @@ LISTS = (HOME, START, CONTACTS, INBOX, SETTINGS, PAIR)
 
 @pytest.mark.parametrize("screen", LISTS)
 def test_lists_step_with_tap_and_two_clicks(screen):
-    """Every list moves the same way as MFruit OS's own lists."""
+    """Every list moves the same way as mFruit OS's own lists."""
     assert nav.route(screen, NEXT).startswith("next_")
     assert nav.route(screen, PREVIOUS).startswith("previous_")
 

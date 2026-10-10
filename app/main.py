@@ -3,7 +3,7 @@
 A push-to-talk voice and text terminal for the Whisplay HAT and a
 Waveshare SX126X LoRa HAT on one Pi Zero 2 W.
 
-The controls are MFruit OS's, the same in every MFruit app (the button
+The controls are mFruit OS's, the same in every mFruit app (the button
 and any USB or Bluetooth keyboard, through mfruit_sdk.input):
 
     tap / Down           next row
@@ -172,8 +172,8 @@ class WalkieApp:
         self._closing = False
         self._wake = threading.Event()
         self._exit_reason = "normal"
-        # MFruit OS's Keep running / Keep screen bright for this app (SDK
-        # background); None until asked, or when MFruit OS cannot say.
+        # mFruit OS's Keep running / Keep screen bright for this app (SDK
+        # background); None until asked, or when mFruit OS cannot say.
         self._background = mfruit_background.get()
 
         # --- display and input -----------------------------------------
@@ -191,7 +191,7 @@ class WalkieApp:
             max_record_seconds=settings.audio.max_record_seconds,
         )
 
-        # The button and any USB / Bluetooth keyboard, as MFruit OS actions.
+        # The button and any USB / Bluetooth keyboard, as mFruit OS actions.
         self.input = InputController(
             self._on_action,
             talk=self._can_talk,
@@ -202,10 +202,10 @@ class WalkieApp:
             click_window_ms=settings.input.click_window_ms,
             talk_press_ms=settings.input.hold_ms,
             long_press_ms=settings.input.long_press_ms,
-            app_id=board_module.APP_ID,    # MFruit OS hands its keys to this app by id
+            app_id=board_module.APP_ID,    # mFruit OS hands its keys to this app by id
         )
         self.input.attach(self.board)
-        # WiFi level for the MFruit OS status bar (battery comes from app.utils.battery).
+        # WiFi level for the mFruit OS status bar (battery comes from app.utils.battery).
         self.status = StatusMonitor(interval=15.0, on_change=lambda _s: self._wake.set())
         for hook, handler in (("on_exit_request", self._on_exit_request),
                               ("on_focus_revoked", self._on_focus_revoked)):
@@ -350,7 +350,7 @@ class WalkieApp:
                 "the LoRa port %s is shared: %s. Whatever else reads it takes "
                 "bytes meant for the radio, so messages arrive broken or not "
                 "at all, and a login shell hangs the port up when it restarts. "
-                "Run MFruit OS's radio setup once over SSH: bash "
+                "Run mFruit OS's radio setup once over SSH: bash "
                 "~/.whisplay-os/system/current/scripts/setup-radio.sh",
                 radio_settings.port, "; ".join(shared))
             self.state.radio_note = "LoRa port shared: run setup"
@@ -447,7 +447,7 @@ class WalkieApp:
                                    self.state.start_row)
 
     def _on_action(self, action):
-        """One MFruit OS input action, from the button or a keyboard."""
+        """One mFruit OS input action, from the button or a keyboard."""
         if action.name == TALK_START:
             if self.display.screen_off:
                 self.display.poke()
@@ -600,7 +600,7 @@ class WalkieApp:
             # Temporary, for testing at distance; see app.rangetest.
             {"key": "range", "label": "Range test",
              "value": "probe a paired radio, log the signal"},
-            {"key": "back", "label": "Back to MFruit OS"},
+            {"key": "back", "label": "Back to mFruit OS"},
         ]
 
     def _chats_summary(self) -> str:
@@ -837,33 +837,33 @@ class WalkieApp:
         count = len([e for e in self.roster.entries() if not e.is_broadcast])
         return f"{count} paired  ·  unpair one" if count else "none yet"
 
-    # --- listening in the background (MFruit OS Keep running) ---------------
+    # --- listening in the background (mFruit OS Keep running) ---------------
     def _background_summary(self) -> str:
         state = getattr(self, "_background", None)
         if state is None:
-            return "needs MFruit OS 1.4 or newer"
+            return "needs mFruit OS 1.4 or newer"
         if state.keep_running and state.screen_bright:
             return "on  ·  listens after you leave"
         if state.keep_running:
-            return "on  ·  dimming deafens radio"   # Keep screen bright off in MFruit OS
+            return "on  ·  dimming deafens radio"   # Keep screen bright off in mFruit OS
         return "off  ·  closes when you leave"
 
     def _toggle_background(self):
-        """Settings > Listen in background: one switch for both of MFruit OS's.
+        """Settings > Listen in background: one switch for both of mFruit OS's.
 
-        On: leaving releases the screen instead of closing, MFruit OS keeps
+        On: leaving releases the screen instead of closing, mFruit OS keeps
         the process and holds the backlight at 100% -- the backlight pin is
         the radio's M0, and dimming it leaves the radio deaf.
         """
         state = getattr(self, "_background", None) or mfruit_background.get()
         if state is None:
-            self.state.flash("needs MFruit OS 1.4 or newer", 4.0)
+            self.state.flash("needs mFruit OS 1.4 or newer", 4.0)
             self._refresh_settings()
             return
         on = not (state.keep_running and state.screen_bright)
         new = mfruit_background.set(keep_running=on, screen_bright=on)
         if new is None:
-            self.state.flash("MFruit OS did not answer; unchanged", 4.0)
+            self.state.flash("mFruit OS did not answer; unchanged", 4.0)
             return
         self._background = new
         log.info("listen in background: %s", "on" if on else "off")
@@ -871,7 +871,7 @@ class WalkieApp:
         self._refresh_settings()
 
     def _keeps_running(self) -> bool:
-        """Ask again on the way out: the user may have changed it in MFruit OS."""
+        """Ask again on the way out: the user may have changed it in mFruit OS."""
         state = mfruit_background.get() or getattr(self, "_background", None)
         self._background = state
         return bool(state and state.keep_running)
@@ -879,8 +879,8 @@ class WalkieApp:
     def _leave_to_background(self):
         """Leave without exiting: give the screen back, keep the radio listening.
 
-        MFruit OS's app contract for a background app: release the screen,
-        stay quiet, never ask for it again; MFruit OS hands it back when the
+        mFruit OS's app contract for a background app: release the screen,
+        stay quiet, never ask for it again; mFruit OS hands it back when the
         user opens the app from Home (``_on_foreground``).
         """
         log.info("leaving to the background; still listening")

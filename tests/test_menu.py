@@ -7,7 +7,7 @@
            Pair devices                -> see test_pairing
            Settings                    -> name, ID, privacy channel ...
 
-Input goes through the same handler the MFruit OS input controller calls
+Input goes through the same handler the mFruit OS input controller calls
 (`_on_action`), so the tests follow what an operator's presses and keys
 actually do: tap next, 2 clicks previous, hold open, 4 clicks back -- and
 on talk screens, where a hold talks, 3 clicks opens.

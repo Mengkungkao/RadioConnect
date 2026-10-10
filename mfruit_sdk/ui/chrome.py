@@ -1,8 +1,8 @@
-"""The screen chrome every MFruit screen shares.
+"""The screen chrome every mFruit screen shares.
 
     status_bar   page name on the left; WiFi and battery on the right
     footer       gesture hints: [("tap", "next"), ("hold", "open")]
-    draw_list    MFruit OS list rows with a highlighted selection
+    draw_list    mFruit OS list rows with a highlighted selection
     toast        a short message above the footer
     message      a centred heading and body for empty and error states
 

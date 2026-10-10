@@ -1,5 +1,5 @@
 """Where the shared radio files live, and the two small ones: the module
-settings MFruit OS's radio setup writes, and this radio's identity.
+settings mFruit OS's radio setup writes, and this radio's identity.
 
 Standard library only. Files are written atomically, readable by their
 owner only, under an exclusive lock so two apps never interleave writes.

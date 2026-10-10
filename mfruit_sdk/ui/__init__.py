@@ -1,4 +1,4 @@
-"""MFruit OS look for apps: theme, fonts, chrome, RGB565. Needs Pillow."""
+"""mFruit OS look for apps: theme, fonts, chrome, RGB565. Needs Pillow."""
 
 from .canvas import Canvas
 from .chrome import Row, draw_list, footer, menu_hints, message, status_bar, text_field, toast

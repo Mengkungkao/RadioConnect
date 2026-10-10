@@ -29,7 +29,7 @@ from app.utils.logger import get_logger
 
 log = get_logger("display")
 
-# MFruit App SDK's converter: lookup tables merged by Pillow, ~11 ms per
+# mFruit App SDK's converter: lookup tables merged by Pillow, ~11 ms per
 # frame on a Pi Zero 2 W without numpy's import cost.
 image_to_rgb565 = to_rgb565
 

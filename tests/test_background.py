@@ -126,7 +126,7 @@ def test_the_microphone_re_arms_once_visible_again(app):
     assert app.recorder.armed is True
 
 
-# --- Listen in background (MFruit OS Keep running + Keep screen bright) ----
+# --- Listen in background (mFruit OS Keep running + Keep screen bright) ----
 from mfruit_sdk import background as mfruit_background  # noqa: E402
 from app import main as main_module  # noqa: E402
 
@@ -189,9 +189,9 @@ def test_the_switch_sets_both_mfruit_os_switches(app, monkeypatch):
 def test_the_switch_explains_an_older_mfruit_os(app, monkeypatch):
     monkeypatch.setattr(main_module.mfruit_background, "get", lambda app_id="": None)
     monkeypatch.setattr(main_module.mfruit_background, "set",
-                        lambda **kwargs: pytest.fail("must not ask an MFruit OS that cannot answer"))
+                        lambda **kwargs: pytest.fail("must not ask an mFruit OS that cannot answer"))
     app._refresh_settings = lambda: None
     app._background = None
     app._toggle_background()
-    assert "MFruit OS" in app.state.banner
-    assert app._background_summary() == "needs MFruit OS 1.4 or newer"
+    assert "mFruit OS" in app.state.banner
+    assert app._background_summary() == "needs mFruit OS 1.4 or newer"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the release archive MFruit OS installs and updates RadioConnect from.
+# Build the release archive mFruit OS installs and updates RadioConnect from.
 #
 #   tools/build-release.sh                 -> dist/radioconnect-<version>.tar.gz
 #                                             and dist/SHA256SUMS
@@ -8,7 +8,7 @@
 #   gh release create v<version> dist/radioconnect-<version>.tar.gz dist/SHA256SUMS
 # The Fruit Store offers it as an update (app page > Update / Updates and
 # versions), verifies the checksum, and keeps the previous version for
-# Roll back. See MFruit OS docs/apps/PUBLISHING.md.
+# Roll back. See mFruit OS docs/apps/PUBLISHING.md.
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.."
 version=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
@@ -17,7 +17,7 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/$name" dist
 # The package: code, vendored SDK, hooks and docs. No tests, caches, local
-# data or git metadata (MFruit OS docs/apps/PACKAGING.md, release contents).
+# data or git metadata (mFruit OS docs/apps/PACKAGING.md, release contents).
 tar --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache --exclude=dist \
     --exclude=tests --exclude='*.pyc' --exclude=.venv -cf - . | tar -xf - -C "$stage/$name"
 checker="${MFRUIT_OS:-$HOME/MFruitOS}/scripts/check-app.py"

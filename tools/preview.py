@@ -5,8 +5,8 @@
     python3 tools/preview.py --out DIR
 
 Writes one PNG per screen and state, plus all-screens.png, a contact sheet.
-On a machine without MFruit OS installed, set
-MFRUIT_FONT_DIR=~/MFruitOS/assets/fonts to preview with MFruit OS's font.
+On a machine without mFruit OS installed, set
+MFRUIT_FONT_DIR=~/MFruitOS/assets/fonts to preview with mFruit OS's font.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def sample(**overrides) -> ViewState:
             {"key": "settings", "label": "Settings", "value": "name, ID, privacy channel"},
             {"key": "status", "label": "Status", "value": "radio, signal, audio and power"},
             {"key": "range", "label": "Range test", "value": "probe a paired radio"},
-            {"key": "back", "label": "Back to MFruit OS"},
+            {"key": "back", "label": "Back to mFruit OS"},
         ],
         start_items=[
             {"key": "to", "address": 0xFFFF, "label": "Everyone", "value": "you 4s ✓"},

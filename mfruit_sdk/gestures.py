@@ -1,6 +1,6 @@
 """One button -> tap, double, triple, quad, hold_start, hold_end.
 
-The same recogniser as MFruit OS's launcher, on a thread instead of an
+The same recogniser as mFruit OS's launcher, on a thread instead of an
 event loop:
 
     press, release, quiet for click_window   -> "tap"
@@ -12,7 +12,7 @@ event loop:
 What a hold *means* is decided by ``InputController``: on a talk screen
 hold_start opens the microphone while the button is still down; everywhere
 else the hold only arms and acts on release, so the release can never leak
-to whatever owns the screen next (MFruit OS root cause RC1).
+to whatever owns the screen next (mFruit OS root cause RC1).
 
 Timing rules, both measured on Whisplay hardware:
 

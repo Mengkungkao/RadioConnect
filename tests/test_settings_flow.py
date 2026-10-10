@@ -23,7 +23,7 @@ from app.utils import clock
 
 from mfruit_sdk.input import BACK, EXTRA, NEXT, PREVIOUS, SELECT, Action
 
-# MFruit OS input actions, named after the button gesture that makes them:
+# mFruit OS input actions, named after the button gesture that makes them:
 # tap, 2 clicks, hold (then release), 3 clicks, 4 clicks.
 TAP, TWICE, HOLD, THRICE, QUAD = NEXT, PREVIOUS, SELECT, EXTRA, BACK
 

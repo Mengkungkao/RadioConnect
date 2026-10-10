@@ -31,16 +31,16 @@ class RadioSettings:
     # each other, like the privacy codes on a handheld walkie-talkie.
     privacy_channel: int = 1
     frequency_mhz: int = 868
-    # Must match what the module was provisioned with (MFruit OS's setup-radio.sh
+    # Must match what the module was provisioned with (mFruit OS's setup-radio.sh
     # writes both): pacing and the duty-cycle budget are worked out from it.
     air_speed: int = 9600
-    # True once MFruit OS's radio setup has recorded what the module holds
+    # True once mFruit OS's radio setup has recorded what the module holds
     # (shared/radio/radio.json); until then frequency and air rate are only
     # this file's guesses, and a radio set up elsewhere will not hear this one.
     provisioned: bool = False
     power_dbm: int = 22
     uart_baud: int = 9600
-    # "auto": the band's rule once MFruit OS's radio setup recorded it (see
+    # "auto": the band's rule once mFruit OS's radio setup recorded it (see
     # radio_defaults); a number overrides it.
     duty_cycle_percent: float | str = "auto"
     # Paired radios ping each other this often, to show which are in range
@@ -111,7 +111,7 @@ class InputSettings:
     # 30-60 ms a real click lasts, and low enough to feel immediate.
     hold_ms: int = 350
     # On every other screen a hold opens the highlighted row after this
-    # long (acting on release), the same as MFruit OS's long press. Longer
+    # long (acting on release), the same as mFruit OS's long press. Longer
     # than a talk hold: choosing is deliberate, talking should be instant.
     long_press_ms: int = 700
 
@@ -147,7 +147,7 @@ class Settings:
 
     @property
     def data_dir(self) -> Path:
-        # Under MFruit OS the app's data lives where updates snapshot it and
+        # Under mFruit OS the app's data lives where updates snapshot it and
         # the Fruit Store can reset or delete it (WHISPLAY_OS_APP_DATA).
         path = Path(os.getenv(f"{ENV_PREFIX}DATA_DIR")
                     or os.getenv("WHISPLAY_OS_APP_DATA")

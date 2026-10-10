@@ -48,7 +48,7 @@ SENDING = "sending"
 RECEIVING = "receiving"
 PLAYING = "playing"
 
-# MFruit OS's layout: status bar (page name, WiFi, battery) at the top,
+# mFruit OS's layout: status bar (page name, WiFi, battery) at the top,
 # gesture hints at the bottom.
 FOOTER_Y = mfruit_layout.FOOTER_Y
 HEADER_HEIGHT = mfruit_layout.CONTENT_TOP - 6
@@ -109,7 +109,7 @@ class ViewState:
     channel: int = 1
     frequency_mhz: int = 868
     air_speed: int = 9600
-    # False until MFruit OS's radio setup recorded the module's settings.
+    # False until mFruit OS's radio setup recorded the module's settings.
     radio_setup: bool = True
 
     home_items: list = field(default_factory=list)
@@ -277,7 +277,7 @@ def _status(state: ViewState) -> Status:
 
 
 def draw_header(draw, state: ViewState, title: str):
-    """MFruit OS's status bar: page name, then LoRa signal, WiFi, battery.
+    """mFruit OS's status bar: page name, then LoRa signal, WiFi, battery.
 
     The signal meter answers "how far can I reach"; it sits in a slot
     the status bar keeps free for it.
@@ -653,7 +653,7 @@ def _hints(screen: str, inbox_empty: bool = False) -> list:
 # --- menus -------------------------------------------------------------
 def draw_menu(draw, state: ViewState, screen: str, title: str, items: list,
               selected: int, top_offset: int = 0):
-    """A list of rows to pick from: Home, Start and Settings, as MFruit OS draws lists."""
+    """A list of rows to pick from: Home, Start and Settings, as mFruit OS draws lists."""
     draw_header(draw, state, title)
     rows = [Row(item["label"], subtitle=str(item.get("value", "")) or None,
                 kind=("back" if item["key"] == "back" else
@@ -1046,7 +1046,7 @@ def draw_editor(draw, state: ViewState):
 def editor_hints(editor) -> list:
     """What the button does in an editor (a keyboard types, Enter saves, Esc cancels)."""
     if hasattr(editor, "prompt"):
-        # "4× back", as in MFruit OS's own dialogs: "cancel" does not fit here.
+        # "4× back", as in mFruit OS's own dialogs: "cancel" does not fit here.
         return [("tap", "change"), ("hold", "confirm"), ("4×", "back")]
     last = (not hasattr(editor, "digits")
             or getattr(editor, "cursor", 0) >= editor.digits - 1)

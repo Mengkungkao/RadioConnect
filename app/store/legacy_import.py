@@ -1,7 +1,7 @@
 """Bring WalkieTalkie's received and sent messages into RadioConnect, once.
 
 RadioConnect is meant to replace WalkieTalkie and Messenger. The radio
-identity, keys and contacts already come through MFruit OS's shared radio
+identity, keys and contacts already come through mFruit OS's shared radio
 store; this copies WalkieTalkie's message list (``inbox.json`` and its voice
 clips) so removing WalkieTalkie later loses no history. It uses the same
 format and the same Device IDs, so the messages land in the right chats.

@@ -1,23 +1,23 @@
-"""Ask MFruit OS to keep this app running after the user leaves it (SDK 1.4.0).
+"""Ask mFruit OS to keep this app running after the user leaves it (SDK 1.4.0).
 
     get()                  -> State(keep_running, screen_bright), or None
     set(keep_running=..., screen_bright=...) -> the new State, or None
 
 ``keep_running`` is the app's *Keep running* switch in Settings > Apps:
-leaving the app then releases the screen instead of closing it, and MFruit
+leaving the app then releases the screen instead of closing it, and mFruit
 OS does not stop the process. ``screen_bright`` is *Keep screen bright*:
-while the app runs in the background, MFruit OS keeps the backlight at 100%
+while the app runs in the background, mFruit OS keeps the backlight at 100%
 instead of dimming or turning it off. Use it only when your app needs it, for
-example a LoRa radio whose mode pin is the backlight pin (MFruit OS KI-11).
+example a LoRa radio whose mode pin is the backlight pin (mFruit OS KI-11).
 The user can change both in Settings > Apps too; read them with ``get()``
 when your app comes back to the foreground.
 
 A background app releases the screen when the user leaves it and stays
 quiet: it must not ask for the screen again (docs/apps/APP_CONTRACT.md).
 
-``None`` means MFruit OS is not there (the app runs on its own) or is too old
+``None`` means mFruit OS is not there (the app runs on its own) or is too old
 to answer (before this request existed): treat the feature as unavailable.
-The request goes to MFruit OS's control socket and names this app (from
+The request goes to mFruit OS's control socket and names this app (from
 ``WHISPLAY_APP_ID``); it is a convenience, not a permission system.
 """
 
@@ -51,7 +51,7 @@ def _socket_path() -> str:
 def _request(args: dict) -> Optional[State]:
     app_id = args.get("app_id") or os.environ.get("WHISPLAY_APP_ID", "")
     if not app_id:
-        log.info("background: no app id (WHISPLAY_APP_ID); not running under MFruit OS")
+        log.info("background: no app id (WHISPLAY_APP_ID); not running under mFruit OS")
         return None
     args = dict(args, app_id=app_id)
     try:
@@ -62,17 +62,17 @@ def _request(args: dict) -> Optional[State]:
             reply = sock.makefile("rb").readline(65536)
         answer = json.loads(reply.decode("utf-8"))
     except (OSError, ValueError, UnicodeDecodeError) as exc:
-        log.info("background: MFruit OS not reachable: %s", exc)
+        log.info("background: mFruit OS not reachable: %s", exc)
         return None
     if not isinstance(answer, dict) or not answer.get("ok"):
-        log.info("background: MFruit OS did not accept the request: %s",
+        log.info("background: mFruit OS did not accept the request: %s",
                  answer.get("error") if isinstance(answer, dict) else answer)
         return None
     return State(bool(answer.get("keep_running")), bool(answer.get("screen_bright")))
 
 
 def get(app_id: str = "") -> Optional[State]:
-    """This app's current switches, or None when MFruit OS cannot say."""
+    """This app's current switches, or None when mFruit OS cannot say."""
     return _request({"app_id": app_id})
 
 

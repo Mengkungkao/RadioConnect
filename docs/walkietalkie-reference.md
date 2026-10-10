@@ -9,9 +9,9 @@ transmitted. Anything another station sends arrives and plays on its
 own, like a walkie-talkie — no pairing handshake, no gateway, no
 internet, a kilometre or more of range.
 
-It is an **MFruit OS app**: it looks and handles like the rest of the
-device — MFruit OS's status bar, lists, footer hints and controls, from
-the vendored MFruit App SDK in `mfruit_sdk/` — and a **USB or Bluetooth
+It is an **mFruit OS app**: it looks and handles like the rest of the
+device — mFruit OS's status bar, lists, footer hints and controls, from
+the vendored mFruit App SDK in `mfruit_sdk/` — and a **USB or Bluetooth
 keyboard** works everywhere the button does.
 
 ```
@@ -25,7 +25,7 @@ keyboard** works everywhere the button does.
 ```
 
 Menus also have a **Back** row: highlight it, hold, then release to go
-back. **Back to MFruit OS** on Home leaves the app. Holding Back never
+back. **Back to mFruit OS** on Home leaves the app. Holding Back never
 opens the microphone.
 
 ---
@@ -445,12 +445,12 @@ Walkie                              ▂▄▆ ≋ ▭ 76%     page name, LoRa si
   Settings        ──▶  name, Device ID, privacy channel, …
   Status          ──▶  radio, signal, audio and power
   Range test      ──▶  probe a paired radio and log the signal (for testing)
-  Back to MFruit OS ─▶  leave the app
+  Back to mFruit OS ─▶  leave the app
 ```
 
-The controls are MFruit OS's, the same in every MFruit app and in the
+The controls are mFruit OS's, the same in every mFruit app and in the
 launcher itself: **tap next · 2 clicks previous · hold (then release)
-open · 4 clicks back**. A hold on a menu only *arms*, after 0.7 s (MFruit
+open · 4 clicks back**. A hold on a menu only *arms*, after 0.7 s (mFruit
 OS's long press, `input.long_press_ms`) — the footer changes to **release
 to open** — and acts when you let go. Talking starts sooner, 0.35 s into
 a hold (`input.hold_ms`), so the first word is not lost.
@@ -501,7 +501,7 @@ does not move the selection away from Back.
 ### With a keyboard
 
 Plug in a USB keyboard or pair a Bluetooth one at any time; it is picked
-up within two seconds. The keys are the same in every MFruit app:
+up within two seconds. The keys are the same in every mFruit app:
 
 | Key | Does |
 |---|---|
@@ -862,8 +862,8 @@ backlight deadline arrives. How:
 | [app/radio/link.py](app/radio/link.py) | Threads, queueing, pacing, peer tracking |
 | [app/audio/codec2.py](app/audio/codec2.py) | `ctypes` binding to libcodec2 |
 | [app/ui/navigation.py](app/ui/navigation.py) | What every input action does on every screen, and the footer hints |
-| [app/ui/screens.py](app/ui/screens.py) | Pure render functions of `ViewState`, in MFruit OS's chrome |
-| [mfruit_sdk/](mfruit_sdk/VENDORED) | MFruit App SDK (vendored): input controller, keyboard, status bar, lists, fonts |
+| [app/ui/screens.py](app/ui/screens.py) | Pure render functions of `ViewState`, in mFruit OS's chrome |
+| [mfruit_sdk/](mfruit_sdk/VENDORED) | mFruit App SDK (vendored): input controller, keyboard, status bar, lists, fonts |
 | [app/main.py](app/main.py) | State machine and the event-driven main loop |
 
 ### On-air format
@@ -1089,13 +1089,13 @@ python3 -m pytest tests -q     # 574 tests, no hardware required
 python3 tools/preview.py       # every screen to PNG in /tmp/walkie-preview
 ```
 
-`tests/test_controls.py` drives the real MFruit OS input controller (a
+`tests/test_controls.py` drives the real mFruit OS input controller (a
 fake clock, no threads) into the app, button and keyboard both.
 
-`mfruit_sdk/` is a copy of MFruit OS's `mfruitos/sdk`: do not edit it
-here. Change it in MFruit OS, then run
+`mfruit_sdk/` is a copy of mFruit OS's `mfruitos/sdk`: do not edit it
+here. Change it in mFruit OS, then run
 `~/MFruitOS/scripts/sdk-sync.sh ~/WalkieTalkie` (`--check` reports a
-stale copy). The rules every MFruit app follows are in
+stale copy). The rules every mFruit app follows are in
 `.claude/rules/mfruit-os-app.md`.
 
 Measured on the Pi with the HAT attached, the full audio path runs well
@@ -1471,16 +1471,16 @@ Radio register layout derived from Waveshare's SX126X HAT sample code.
 Speech coding by [Codec2](https://www.rowetel.com/codec2.html) (David
 Rowe, LGPL). Display and button access through the Whisplay daemon.
 
-## MFruit OS 1.4.0 keyboard compatibility
+## mFruit OS 1.4.0 keyboard compatibility
 
-Vendored SDK 1.2.0 reads keys from MFruit OS's foreground key hub while the
+Vendored SDK 1.2.0 reads keys from mFruit OS's foreground key hub while the
 launcher holds keyboards exclusively. Standalone use falls back to evdev.
-Deploy this SDK with MFruit OS 1.4.0 so keyboard input continues to work.
+Deploy this SDK with mFruit OS 1.4.0 so keyboard input continues to work.
 
 
-## MFruit OS lifecycle validation
+## mFruit OS lifecycle validation
 
-Managed launches preserve MFruit OS's launch wrapper and logging registration;
+Managed launches preserve mFruit OS's launch wrapper and logging registration;
 standalone launches still register themselves. A hold on a dark talk screen
 only wakes it. Release, then hold again to record. Regression coverage lives
 in `tests/test_board_registration.py` and `tests/test_controls.py`.

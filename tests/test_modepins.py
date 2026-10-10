@@ -90,7 +90,7 @@ def test_check_and_warn_returns_the_same_shape(monkeypatch):
 
 
 def test_m1_high_only_while_frames_are_drawn_is_not_deaf(monkeypatch):
-    """MFruit OS parks the LCD's DC line (M1) low between frames; a sample
+    """mFruit OS parks the LCD's DC line (M1) low between frames; a sample
     taken while the screen draws catches a few of them."""
     fake_reader(monkeypatch, [(0, 1) if i == 3 else (0, 0) for i in range(12)])
     result = modepins.sample(samples=12, seconds=0.0)

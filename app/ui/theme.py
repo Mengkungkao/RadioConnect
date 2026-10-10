@@ -1,4 +1,4 @@
-"""Palette, fonts and metrics for the 240x280 panel (MFruit OS's look).
+"""Palette, fonts and metrics for the 240x280 panel (mFruit OS's look).
 
 Colours are picked for a small, often outdoor-viewed LCD: strongly
 separated hues at high value, no mid-grey text, and one unmistakable
@@ -37,7 +37,7 @@ def corner_inset(y: int) -> int:
     offset = CORNER_RADIUS - depth
     return int(round(CORNER_RADIUS - (CORNER_RADIUS ** 2 - offset ** 2) ** 0.5))
 
-# MFruit OS's palette (mfruit_sdk), so the app looks like the rest of the
+# mFruit OS's palette (mfruit_sdk), so the app looks like the rest of the
 # device. The state colours keep their meaning: red is transmitting, green
 # receiving, amber waiting on the duty cycle, violet voice.
 MFRUIT = _mfruit.DARK
@@ -45,7 +45,7 @@ MFRUIT = _mfruit.DARK
 BG = MFRUIT.bg
 SURFACE = MFRUIT.surface
 SURFACE_HI = MFRUIT.surface_hi
-SELECTED = MFRUIT.accent_dim    # a selected row, as in MFruit OS's lists
+SELECTED = MFRUIT.accent_dim    # a selected row, as in mFruit OS's lists
 BORDER = (58, 66, 82)
 
 TEXT = MFRUIT.text
@@ -72,7 +72,7 @@ _cache = {}
 
 
 def font(size: int, weight: str = "regular"):
-    """MFruit OS's font (Inter, or DejaVu without MFruit OS); "mono" is DejaVu Mono."""
+    """mFruit OS's font (Inter, or DejaVu without mFruit OS); "mono" is DejaVu Mono."""
     if weight != "mono":
         return _fonts.font(size, "bold" if weight == "bold" else weight)
     key = (size, weight)

@@ -1,11 +1,11 @@
 """The shared LoRa radio: one setup, one identity, one contact list.
 
-Every MFruit app that uses the LoRa HAT (WalkieTalkie, Messenger, ...)
+Every mFruit app that uses the LoRa HAT (WalkieTalkie, Messenger, ...)
 talks through the same module on the same frequency, so the things they
-must agree on are stored once, in MFruit OS's shared radio directory
-(``<MFruit OS home>/shared/radio``, mode 0700), instead of in each app:
+must agree on are stored once, in mFruit OS's shared radio directory
+(``<mFruit OS home>/shared/radio``, mode 0700), instead of in each app:
 
-    radio.json      module settings written by MFruit OS's radio setup
+    radio.json      module settings written by mFruit OS's radio setup
                     (frequency, air rate, power, port); apps only read it
     device.json     this radio's Device ID and name
     keys.json       this radio's keys and the keys of every paired radio

@@ -1,7 +1,7 @@
-"""InputController: the button and a keyboard, turned into MFruit OS actions.
+"""InputController: the button and a keyboard, turned into mFruit OS actions.
 
-Every MFruit app reads input through this class, so the same gesture or
-key does the same thing in every app and in MFruit OS itself:
+Every mFruit app reads input through this class, so the same gesture or
+key does the same thing in every app and in mFruit OS itself:
 
     action       button                 keyboard
     ----------   --------------------   -----------------------------
@@ -23,7 +23,7 @@ hold is taken. Everywhere else a hold *arms* at ``long_press_ms``
 (``on_armed(True)``, show "release to open") and selects on release.
 While ``typing()`` is true, Space types a space instead of talking.
 
-**Ownership.** MFruit OS grabs keyboards exclusively and forwards keys to
+**Ownership.** mFruit OS grabs keyboards exclusively and forwards keys to
 the foreground app through its key hub. Without a hub, the SDK reads evdev.
 The button is routed by whisplay-daemon. The controller acts only while
 ``active()`` is true (the app owns the screen), and only on keys it saw go
@@ -97,13 +97,13 @@ class InputController:
         hold_after = None
         if talk_press_ms is not None:
             # Talking should start promptly; opening from a menu stays a
-            # deliberate hold, as in MFruit OS.
+            # deliberate hold, as in mFruit OS.
             talk_s, select_s = talk_press_ms / 1000.0, long_press_ms / 1000.0
             hold_after = lambda: talk_s if self.talk() else select_s  # noqa: E731
         self.gestures = ButtonGestures(self._on_gesture, click_window_ms=click_window_ms,
                                        long_press_ms=long_press_ms, debounce_ms=debounce_ms,
                                        clock=clock, threaded=threaded, hold_after=hold_after)
-        # The app's id lets MFruit OS's key hub route keys to it while it has
+        # The app's id lets mFruit OS's key hub route keys to it while it has
         # the screen (see keys.py); WHISPLAY_APP_ID is set by mfruit-run.
         app_id = app_id or os.environ.get("WHISPLAY_APP_ID") or None
         self.keys = KeyReader(self.key_event, app_id=app_id) if keyboard else None

@@ -192,7 +192,7 @@ def test_footer_hints_fit_the_panel(screen):
 
 
 def _first_three_fit(hints) -> bool:
-    """The MFruit OS footer's own arithmetic (mfruit_sdk.ui.chrome.footer)."""
+    """The mFruit OS footer's own arithmetic (mfruit_sdk.ui.chrome.footer)."""
     from mfruit_sdk.ui import Canvas
     from mfruit_sdk.ui.theme import CORNER_INSET
 
@@ -457,13 +457,13 @@ def test_pair_screen_renders_with_each_radio_selected(display, index):
 
 
 
-# Fit checks measure with the device's font. MFruit OS ships Inter; where it
+# Fit checks measure with the device's font. mFruit OS ships Inter; where it
 # is not installed (nor a ~/MFruitOS checkout) the SDK falls back to the
 # wider DejaVu and truncates with an ellipsis, which is what the device
 # would do too -- so these only mean something with Inter.
 needs_inter = pytest.mark.skipif(
     not __import__("mfruit_sdk.ui.fonts", fromlist=["shared"]).shared().is_inter,
-    reason="MFruit OS's font (Inter) not found; set MFRUIT_FONT_DIR")
+    reason="mFruit OS's font (Inter) not found; set MFRUIT_FONT_DIR")
 
 
 @needs_inter
