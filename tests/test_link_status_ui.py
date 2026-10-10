@@ -248,3 +248,44 @@ def test_the_count_replaces_the_signal_bars(display, count, weak, colour):
         assert theme.TEXT_FAINT not in pixels or colour == "TEXT_FAINT"
     # The old meter's empty bars were SURFACE_HI; nothing of it is left.
     assert theme.SURFACE_HI not in pixels
+
+
+# --- a light after each radio's name ----------------------------------------------
+@pytest.mark.parametrize("reach,colour,hollow", [
+    (IN_RANGE, "OK", False), ("weak signal", "WARN", False),
+    (DISCONNECTED, "DANGER", True), ("not checked yet", "TEXT_FAINT", True),
+    ("keys changed", "DANGER", False),
+])
+def test_the_light_follows_the_link_check(reach, colour, hollow):
+    from app.ui import theme
+
+    state = populated_state(link_status={1: (reach, "")})
+    assert screens.range_mark(state, 1) == {"mark": getattr(theme, colour),
+                                            "mark_hollow": hollow}
+
+
+def test_no_light_for_everyone_or_rows_that_are_not_radios():
+    state = populated_state(link_status={1: (IN_RANGE, "")})
+    assert screens.range_mark(state, 0xFFFF) == {}
+    assert screens.range_mark(state, "back") == {}
+    assert screens.range_mark(state, 7) == {}            # not a watched radio
+
+
+@pytest.mark.parametrize("screen", [TALK, CONTACTS, "chats"])
+def test_a_radio_in_range_has_a_green_light_after_its_name(display, screen):
+    from app.ui import theme
+    from app.ui.screens import CHATS, START
+
+    screen = {TALK: START, "chats": CHATS}.get(screen, screen)
+    state = populated_state(screen=screen, link_status={1: (IN_RANGE, "in range")},
+                            radios_in_range=0)
+    state.start_items = [{"key": "to", "address": 1, "label": "Base", "value": "in range"},
+                         {"key": "back", "label": "Back"}]
+    state.chats = [{"key": 1, "label": "Base", "value": "voice 4s"},
+                   {"key": "back", "label": "Back"}]
+    image, draw = display.new_canvas()
+    screens.RENDERERS[screen](draw, state)
+    green = [x for x in range(theme.SCREEN_WIDTH) for y in range(40, 200)
+             if image.getpixel((x, y)) == theme.OK]
+    assert green, "a green light on the Base row"
+    assert min(green) > 40 and max(green) < 120, "right after the name, not at the edge"

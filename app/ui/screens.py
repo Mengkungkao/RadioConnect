@@ -62,6 +62,9 @@ CONTENT_HEIGHT = CONTENT_BOTTOM - CONTENT_TOP
 BACK_TOP = CONTENT_BOTTOM - 32
 LIST_BOTTOM = BACK_TOP - 6
 
+# Paired list: names start here (the range light follows the name).
+NAME_X = 16
+
 # Room in the status bar for the radios-in-range count, left of WiFi/battery
 # (a radio icon and one digit; a second digit takes 1 px of the gap).
 RANGE_SLOT = 22
@@ -267,6 +270,19 @@ RANGE_DOT = {
     "keys changed": (theme.DANGER, True),
 }
 RANGE_COLOUR = {state: colour for state, (colour, _filled) in RANGE_DOT.items()}
+
+
+def range_mark(state, address) -> dict:
+    """Row(mark=...) for a paired radio: the light after its name says
+    whether it is in range now (green), weakly heard (amber), gone (red ring)
+    or not checked yet (grey ring). Nothing for Everyone or other rows."""
+    if not isinstance(address, int) or address == 0xFFFF:
+        return {}
+    reach, _detail = state.link_status.get(address, ("", ""))
+    if not reach:
+        return {}
+    colour, filled = RANGE_DOT.get(reach, (theme.TEXT_FAINT, False))
+    return {"mark": colour, "mark_hollow": not filled}
 STATE_LABEL = {
     IDLE: "Ready", RECORDING: "Recording", SENDING: "Sending",
     RECEIVING: "Receiving", PLAYING: "Playing",
@@ -380,24 +396,26 @@ def draw_contacts(draw, state: ViewState):
             dot, filled = theme.WARN, True
         else:
             dot, filled = theme.TEXT_FAINT, False
-        box = [16, top + CONTACT_PANEL // 2 - 4, 24, top + CONTACT_PANEL // 2 + 4]
-        if filled:
-            draw.ellipse(box, fill=dot)
-        else:
-            draw.ellipse(box, outline=dot, width=2)
-
         # The name shares the row with the signal reading on the right,
-        # so it gets the width that is actually left over.
+        # so it gets the width that is actually left over; the light comes
+        # right after the name, as on Talk and Chats.
         rssi_text = "" if entry.last_rssi is None else f"{entry.last_rssi}"
         small = theme.font(11)
         rssi_width = (int(draw.textlength(rssi_text, font=small)) + 10
                       if rssi_text else 0)
-        text_width = theme.SCREEN_WIDTH - 32 - MARGIN - 6 - rssi_width
+        text_width = theme.SCREEN_WIDTH - NAME_X - MARGIN - 6 - rssi_width
 
         name_font = theme.font(15, "bold" if chosen else "regular")
-        draw.text((32, top + CONTACT_NAME_Y),
-                  ellipsise(draw, entry.name, name_font, text_width),
+        name = ellipsise(draw, entry.name, name_font, text_width - 14)
+        draw.text((NAME_X, top + CONTACT_NAME_Y), name,
                   font=name_font, fill=theme.TEXT if chosen else theme.TEXT_DIM)
+        left = NAME_X + int(draw.textlength(name, font=name_font)) + 6
+        middle = top + CONTACT_NAME_Y + 10
+        box = [left, middle - 4, left + 8, middle + 4]
+        if filled:
+            draw.ellipse(box, fill=dot)
+        else:
+            draw.ellipse(box, outline=dot, width=2)
         if entry.is_broadcast:
             detail = entry.status
         elif entry.address in state.unpaired:
@@ -406,7 +424,7 @@ def draw_contacts(draw, state: ViewState):
             detail = f"{entry.address} · {reach_detail}"
         else:
             detail = f"{entry.address} · {entry.status}"
-        draw.text((32, top + CONTACT_DETAIL_Y),
+        draw.text((NAME_X, top + CONTACT_DETAIL_Y),
                   ellipsise(draw, detail, small, text_width),
                   font=small, fill=theme.TEXT_FAINT)
 
@@ -669,12 +687,14 @@ def _hints(screen: str, inbox_empty: bool = False) -> list:
 
 # --- menus -------------------------------------------------------------
 def draw_menu(draw, state: ViewState, screen: str, title: str, items: list,
-              selected: int, top_offset: int = 0):
-    """A list of rows to pick from: Home, Start and Settings, as mFruit OS draws lists."""
+              selected: int, top_offset: int = 0, marks: bool = False):
+    """A list of rows to pick from: Home, Start and Settings, as mFruit OS draws lists.
+    ``marks``: rows keyed by a radio's address show whether it is in range."""
     draw_header(draw, state, title)
     rows = [Row(item["label"], subtitle=str(item.get("value", "")) or None,
                 kind=("back" if item["key"] == "back" else
-                      "danger" if item.get("destructive") else "action"))
+                      "danger" if item.get("destructive") else "action"),
+                **(range_mark(state, item["key"]) if marks else {}))
             for item in items]
     draw_list(Canvas.over(draw, theme.MFRUIT), rows, selected % len(rows) if rows else 0,
               top=CONTENT_TOP + top_offset, empty="Nothing here")
@@ -700,7 +720,8 @@ def draw_start(draw, state: ViewState):
 
     draw_header(draw, state, PAGE_TITLES[START])
     rows = [Row(item["label"], subtitle=str(item.get("value", "")) or None,
-                kind="back" if item["key"] == "back" else "action")
+                kind="back" if item["key"] == "back" else "action",
+                **range_mark(state, item.get("address")))
             for item in state.start_items]
     canvas = Canvas.over(draw, theme.MFRUIT)
     draw_list(canvas, rows, state.start_index % len(rows) if rows else 0,
@@ -743,7 +764,8 @@ def tick(item) -> str:
 
 
 def draw_chats(draw, state: ViewState):
-    draw_menu(draw, state, CHATS, PAGE_TITLES[CHATS], state.chats, state.chats_index)
+    draw_menu(draw, state, CHATS, PAGE_TITLES[CHATS], state.chats, state.chats_index,
+              marks=True)
 
 
 def draw_replies(draw, state: ViewState):

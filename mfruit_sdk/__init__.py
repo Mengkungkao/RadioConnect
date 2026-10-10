@@ -18,4 +18,4 @@ which is what lets the same files work under either package name.
 See APP_DEVELOPMENT.md ("mFruit App SDK") and docs/APP_RULES.md.
 """
 
-SDK_VERSION = "1.4.0"
+SDK_VERSION = "1.5.0"

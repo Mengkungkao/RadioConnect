@@ -139,13 +139,24 @@ def menu_hints(select: str = "open", armed: bool = False, back: str = "back") ->
 
 
 class Row(NamedTuple):
-    """One list row. ``kind``: action | nav | toggle | info | back | danger."""
+    """One list row. ``kind``: action | nav | toggle | info | back | danger.
+
+    ``mark`` (SDK 1.5.0) is a small status light right after the label, such
+    as "this radio is in range": a tone name (success | warning | error |
+    accent | muted) or a colour. ``mark_hollow`` draws it as a ring.
+    """
     label: str
     subtitle: Any = None
     value: Any = None            # right-hand text, or bool for toggles
     kind: str = "action"
     tone: str = ""               # success | warning | error | accent | muted
     enabled: bool = True
+    mark: Any = None
+    mark_hollow: bool = False
+
+
+MARK_SIZE = 8                    # the status light's diameter
+MARK_GAP = 6                     # between the label and the light
 
 
 def row_height(row: Row) -> int:
@@ -224,14 +235,27 @@ def _draw_row(c, row: Row, y: int, height: int, left: int, right: int, selected:
         right_edge -= w + 8
     max_w = right_edge - x
     weight = "semibold" if selected else "medium"
+    # The label leaves room for the mark after it.
+    label_w = max_w - (MARK_GAP + MARK_SIZE if row.mark is not None else 0)
     if row.subtitle:
-        c.text(x, y + 7, str(row.label), 15, weight, base, max_width=max_w)
+        drawn = c.text(x, y + 7, str(row.label), 15, weight, base, max_width=label_w)
+        label_mid = y + 7 + 9
         sub_tone = row.tone if value in (None, "") and row.kind != "nav" else ""
         c.text(x, y + 26, str(row.subtitle), 12, "regular",
                tone_color(t, sub_tone, t.text_muted), max_width=max_w)
     else:
-        c.text(x, y + height // 2, str(row.label), 15, weight, base, anchor="lm",
-               max_width=max_w)
+        drawn = c.text(x, y + height // 2, str(row.label), 15, weight, base, anchor="lm",
+                       max_width=label_w)
+        label_mid = y + height // 2
+    if row.mark is not None:
+        colour = (tone_color(t, row.mark, t.text_faint) if isinstance(row.mark, str)
+                  else row.mark)
+        left = x + drawn + MARK_GAP
+        box = (left, label_mid - MARK_SIZE // 2, left + MARK_SIZE, label_mid + MARK_SIZE // 2)
+        if row.mark_hollow:
+            c.draw.ellipse(box, outline=colour, width=2)
+        else:
+            c.draw.ellipse(box, fill=colour)
 
 
 def toast(c, text: str, tone: str = "", y: int = FOOTER_Y - 40) -> None:

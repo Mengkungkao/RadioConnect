@@ -72,6 +72,10 @@ pop-up says which, and how many are in range with it ("Ridge connected · 2 in
 range"). Before 0.6.0 that place held four signal bars for the last packet
 heard; that signal is still on **Status** and on the range test.
 
+A light right after each radio's name, on **Talk**, **Chats** and **Paired
+radios**, says the same for that radio: green in range, amber weakly heard, a
+red ring when it dropped out, a grey ring before the first check.
+
 **Settings → Paired radios** lists them. Hold on one to unpair it, then confirm.
 That removes its keys, contact and name in every radio app on this device. Its
 past messages stay in Chats' history. Unpair on the other radio too, or it will
