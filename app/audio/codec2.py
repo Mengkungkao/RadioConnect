@@ -59,35 +59,48 @@ def _load():
         found = ctypes.util.find_library("codec2")
         if found:
             candidates.insert(0, found)
+        too_old = []
         for name in candidates:
             try:
                 lib = ctypes.CDLL(name)
             except OSError:
                 continue
-            lib.codec2_create.argtypes = [ctypes.c_int]
-            lib.codec2_create.restype = ctypes.c_void_p
-            lib.codec2_destroy.argtypes = [ctypes.c_void_p]
-            lib.codec2_destroy.restype = None
-            lib.codec2_encode.argtypes = [
-                ctypes.c_void_p, ctypes.POINTER(ctypes.c_ubyte),
-                ctypes.POINTER(ctypes.c_short),
-            ]
-            lib.codec2_encode.restype = None
-            lib.codec2_decode.argtypes = [
-                ctypes.c_void_p, ctypes.POINTER(ctypes.c_short),
-                ctypes.POINTER(ctypes.c_ubyte),
-            ]
-            lib.codec2_decode.restype = None
-            for fn in ("codec2_samples_per_frame", "codec2_bits_per_frame",
-                       "codec2_bytes_per_frame"):
-                getattr(lib, fn).argtypes = [ctypes.c_void_p]
-                getattr(lib, fn).restype = ctypes.c_int
+            try:
+                _bind(lib)
+            except AttributeError:
+                # A codec2 before 1.0 (0.9 on Debian 11 and Ubuntu 20.04)
+                # lacks codec2_bytes_per_frame and friends.
+                too_old.append(name)
+                continue
             _lib = lib
             log.info("libcodec2 loaded from %s", name)
             return _lib
+        if too_old:
+            raise Codec2Unavailable(
+                f"libcodec2 is too old ({too_old[0]}); voice needs 1.0 or newer "
+                "(libcodec2-1.0 or libcodec2-1.2)")
         raise Codec2Unavailable(
             "libcodec2 not found -- install it with: sudo apt install libcodec2-1.2"
         )
+
+
+def _bind(lib):
+    """Declare the functions used; AttributeError if one is missing."""
+    lib.codec2_create.argtypes = [ctypes.c_int]
+    lib.codec2_create.restype = ctypes.c_void_p
+    lib.codec2_destroy.argtypes = [ctypes.c_void_p]
+    lib.codec2_destroy.restype = None
+    lib.codec2_encode.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_ubyte), ctypes.POINTER(ctypes.c_short),
+    ]
+    lib.codec2_encode.restype = None
+    lib.codec2_decode.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_short), ctypes.POINTER(ctypes.c_ubyte),
+    ]
+    lib.codec2_decode.restype = None
+    for fn in ("codec2_samples_per_frame", "codec2_bits_per_frame", "codec2_bytes_per_frame"):
+        getattr(lib, fn).argtypes = [ctypes.c_void_p]
+        getattr(lib, fn).restype = ctypes.c_int
 
 
 def available() -> bool:

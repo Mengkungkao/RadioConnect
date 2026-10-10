@@ -285,7 +285,9 @@ def test_a_radio_in_range_has_a_green_light_after_its_name(display, screen):
                    {"key": "back", "label": "Back"}]
     image, draw = display.new_canvas()
     screens.RENDERERS[screen](draw, state)
-    green = [x for x in range(theme.SCREEN_WIDTH) for y in range(40, 200)
+    # Left part of the rows only: the Paired list prints the signal strength
+    # on the right in the same green (seen with DejaVu, when Inter is absent).
+    green = [x for x in range(150) for y in range(40, 200)
              if image.getpixel((x, y)) == theme.OK]
     assert green, "a green light on the Base row"
-    assert min(green) > 40 and max(green) < 120, "right after the name, not at the edge"
+    assert min(green) > 40 and max(green) < 120, "right after the name"

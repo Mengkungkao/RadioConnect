@@ -1401,15 +1401,18 @@ class WalkieApp:
             return
         _public, broadcast, announced = opened
         self._pairing_with = None
+        # Pairing is heard across privacy channels, talking is not: the
+        # radio that asked joins the channel of the one that said yes, or
+        # the two would be paired and still unable to hear each other. First,
+        # so that once Talk shows the new radio, everything goes on its channel.
+        joined = message.channel != self.settings.radio.privacy_channel
+        if joined:
+            self._apply_channel(message.channel)
         self.keyring.add_peer(addr, expected, broadcast)
         self.link.mark_linked(addr)
         self._add_contact(announced or name, addr)
         self._finish_pairing(addr, announced or name)
-        # Pairing is heard across privacy channels, talking is not: the
-        # radio that asked joins the channel of the one that said yes, or
-        # the two would be paired and still unable to hear each other.
-        if message.channel != self.settings.radio.privacy_channel:
-            self._apply_channel(message.channel)
+        if joined:
             self.state.flash(f"paired with {announced or name} · now on channel "
                              f"{message.channel}", 5.0)
 

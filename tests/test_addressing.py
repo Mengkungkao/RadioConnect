@@ -27,6 +27,16 @@ def make_link(port, addr, monkeypatch, callsign="", token=None):
                     token=token)
 
 
+def wait_for(predicate, timeout=5.0):
+    """Each radio handles a packet on its own receive thread: wait for the
+    counter that is raised when it has (a fixed sleep lost that race on a
+    loaded 32-bit run)."""
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
 @pytest.fixture
 def trio(monkeypatch):
     ports = FakeModule.network(3)
@@ -47,10 +57,9 @@ def test_a_message_reaches_only_its_destination(trio):
 
     alice.send_text(3, "for carol")
     assert carol_inbox.wait()[0][0].body == b"for carol"
-    time.sleep(0.3)
-    assert bob_inbox.messages == []
     # Overheard, not delivered: it still proves Alice is on the air.
-    assert bob.stats.overheard == 1
+    assert wait_for(lambda: bob.stats.overheard == 1)
+    assert bob_inbox.messages == []
     assert bob.peers[1].present
 
 
@@ -108,9 +117,8 @@ def test_our_own_beacon_echoed_back_is_not_a_clash(monkeypatch):
     link.start()
     try:
         link.send_pair()
-        time.sleep(0.6)
+        assert wait_for(lambda: link.stats.self_addressed_drops == 1)
         assert clashes == []
-        assert link.stats.self_addressed_drops == 1
     finally:
         link.stop()
 
@@ -149,9 +157,8 @@ def test_another_channel_is_not_heard_at_all(trio):
 
     alice.send_text(protocol.BROADCAST, "channel one")
     assert bob_inbox.wait()[0][0].body == b"channel one"
-    time.sleep(0.3)
+    assert wait_for(lambda: carol.stats.other_channel == 1)
     assert carol_inbox.messages == []
-    assert carol.stats.other_channel == 1
     assert 1 not in carol.peers           # not even noted as present
 
 
@@ -163,7 +170,7 @@ def test_radios_on_the_same_other_channel_hear_each_other(trio):
     carol.set_channel(9)
     alice.send_text(3, "on nine")
     assert inbox.wait()[0][0].body == b"on nine"
-    assert bob.stats.other_channel == 1
+    assert wait_for(lambda: bob.stats.other_channel == 1)
 
 
 def test_handshakes_and_beacons_do_not_drive_the_progress_bar(trio):
