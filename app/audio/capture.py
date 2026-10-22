@@ -28,12 +28,21 @@ cannot afford. Arming follows the screen: awake means in use and PTT is
 instant, and when the backlight blanks the capture stream is dropped and
 the codec powers down. `start()` still works when disarmed, falling back
 to a cold spawn, so nothing depends on the arming being right.
+
+The capture card is exclusive: while another program holds it, `arecord`
+quits at once with "Device or resource busy". On an Orange Pi Zero 2W
+(2026-10-22) a recorder the AI Chatbot left behind did exactly that, and
+every press recorded 0 bytes and said only "too short". So a stream that
+ends by itself keeps arecord's reason in `error`, `failed` tells the app
+while the press is still held, and the next press opens the card again
+instead of trusting a dead stream.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -104,8 +113,13 @@ class Recorder:
         # audio is distorted before anything here can help, and levelling
         # afterwards only makes the distortion louder.
         self.last_clipped = 0.0
+        # Why the capture stream ended without being asked, in arecord's own
+        # words (another program holding the card: "... Device or resource
+        # busy"); None while it runs or after a clean stop.
+        self.error = None
 
         self._process = None
+        self._errors = None         # arecord's stderr, read once it has quit
         self._thread = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -128,6 +142,19 @@ class Recorder:
     @property
     def armed(self) -> bool:
         return self._armed and self._process is not None
+
+    @property
+    def failed(self) -> bool:
+        """A press is held, but the stream feeding it has ended."""
+        return self._recording and self.error is not None
+
+    @property
+    def busy(self) -> bool:
+        """The last stream ended because another program has the card."""
+        return bool(self.error) and "busy" in self.error.lower()
+
+    def _live(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     @property
     def elapsed(self) -> float:
@@ -159,22 +186,27 @@ class Recorder:
             "arecord", "-q", "-D", self.device, "-t", "raw",
             "-f", "S16_LE", "-r", str(CAPTURE_RATE), "-c", "1",
         ]
+        # A file, not a pipe: nobody reads it while arecord runs, and a full
+        # pipe would stall the audio behind it.
+        errors = tempfile.TemporaryFile()
         try:
             self._process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                bufsize=0,
+                command, stdout=subprocess.PIPE, stderr=errors, bufsize=0,
             )
         except OSError:
             log.exception("could not start arecord")
+            errors.close()
             self._process = None
             return False
 
+        self._errors = errors
+        self.error = None
         self._stop.clear()
         with self._lock:
             self._ring.clear()
             self._ring_bytes = 0
         self._thread = threading.Thread(target=self._drain, name="capture",
-                                        daemon=True)
+                                        args=(self._process, errors), daemon=True)
         self._thread.start()
         return True
 
@@ -193,13 +225,17 @@ class Recorder:
         if self._thread:
             self._thread.join(timeout=1.0)
             self._thread = None
+        if self._errors is not None:
+            self._errors.close()
+            self._errors = None
         self.level = 0.0
 
-    def _drain(self):
-        stream = self._process.stdout if self._process else None
+    def _drain(self, process, errors):
+        stream = process.stdout if process else None
         if stream is None:
             return
         limit = int(self.max_seconds * BYTES_PER_SECOND)
+        capped = False
         while not self._stop.is_set():
             try:
                 data = stream.read(CHUNK)
@@ -210,19 +246,42 @@ class Recorder:
             self.level = _rms(data)
             with self._lock:
                 if self._recording:
-                    self._captured.append(data)
-                    self._captured_bytes += len(data)
-                    over = self._captured_bytes >= limit
+                    # Past the cap the audio is dropped, but the stream is
+                    # still read: once it stopped here, an armed recorder
+                    # stayed "warm" with nothing feeding it, and every later
+                    # press came back empty.
+                    if self._captured_bytes < limit:
+                        self._captured.append(data)
+                        self._captured_bytes += len(data)
+                    elif not capped:
+                        capped = True
+                        log.info("recording hit the %.0fs cap", self.max_seconds)
                 else:
-                    over = False
+                    capped = False
                     self._ring.append(data)
                     self._ring_bytes += len(data)
                     while self._ring_bytes - len(self._ring[0]) >= self.preroll_bytes:
                         self._ring_bytes -= len(self._ring.popleft())
-            if over:
-                log.info("recording hit the %.0fs cap", self.max_seconds)
-                break
         self.level = 0.0
+        if not self._stop.is_set():
+            self._ended_by_itself(process, errors)
+
+    def _ended_by_itself(self, process, errors):
+        """arecord quit without being asked: keep its reason for the app."""
+        try:
+            code = process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            code = None
+        said = ""
+        try:
+            errors.seek(0)
+            lines = errors.read()[-512:].decode("utf-8", "replace").splitlines()
+            said = next((line.strip() for line in reversed(lines) if line.strip()), "")
+        except (ValueError, OSError):
+            pass
+        self.error = said or f"arecord exited with code {code}"
+        log.warning("the microphone stream ended by itself: %s%s", self.error,
+                    " -- another program is holding the sound card" if self.busy else "")
 
     # --- push to talk ---------------------------------------------------
     def start(self) -> bool:
@@ -230,6 +289,10 @@ class Recorder:
         if self._recording or not self.available:
             return False
 
+        if self._process is not None and not self._live():
+            # The stream ended under us (arecord quit, e.g. the card was
+            # busy): a "warm" start would keep nothing. Open it again.
+            self._teardown()
         cold = self._process is None
         if cold and not self._spawn():
             return False

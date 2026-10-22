@@ -1942,6 +1942,12 @@ class WalkieApp:
             self.state.flash("mic too loud: hold the radio further away", 4.0)
 
         duration = len(pcm) / 2 / SAMPLE_RATE
+        if not pcm and getattr(self.recorder, "error", None):
+            # Released before the next frame noticed: the same answer.
+            self.state.flash(self._microphone_problem(), 4.0)
+            self.player.cue(self.cues.error)
+            self._wake.set()
+            return
         if duration < MIN_TALK_SECONDS or not pcm:
             self.state.flash("too short")
             self.player.cue(self.cues.error)
@@ -1954,6 +1960,26 @@ class WalkieApp:
             target=self._encode_and_send, args=(pcm, duration),
             name="encode-send", daemon=True,
         ).start()
+        self._wake.set()
+
+    def _microphone_problem(self) -> str:
+        if getattr(self.recorder, "busy", False):
+            return "mic busy: another program is using it"
+        return "microphone stopped: try again"
+
+    def _check_the_microphone(self):
+        """End a press whose microphone stream has died, and say why.
+
+        Otherwise the operator talks into nothing until they let go, and
+        then only hears "too short".
+        """
+        if self.state.radio_state != RECORDING or not getattr(self.recorder, "failed", False):
+            return
+        self.recorder.stop()
+        self.state.radio_state = IDLE
+        self.display.set_led(theme.LED_IDLE)
+        self.state.flash(self._microphone_problem(), 4.0)
+        self.player.cue(self.cues.error)
         self._wake.set()
 
     def _encode_and_send(self, pcm: bytes, duration: float):
@@ -2278,6 +2304,7 @@ class WalkieApp:
             self.chat.refresh()       # voice sent or played changes the bubbles
         if self.state.screen == START:
             self.state.start_items = self._start_items()   # ticks and reach move on
+        self._check_the_microphone()
         if self.recorder.recording:
             self.state.record_level = self.recorder.level
             self.state.record_seconds = self.recorder.elapsed
