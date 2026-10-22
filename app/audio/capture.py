@@ -52,11 +52,15 @@ from app.utils.logger import get_logger
 
 log = get_logger("capture")
 
-# The card is opened at its own rate and the audio converted here, with a
-# proper filter; see app.audio.dsp for why, and what it measured.
+# The card is opened at its own rate, in stereo, and the audio converted
+# here: a proper filter for the rate, and both channels mixed to one (asked
+# for a single channel, the Whisplay card on an Orange Pi Zero 2W gave the
+# microphone 35 dB down). See app.audio.dsp for both.
 CAPTURE_RATE = dsp.HARDWARE_RATE
-BYTES_PER_SECOND = CAPTURE_RATE * 2  # 16-bit mono
-CHUNK = 6144                         # ~64 ms per pipe read
+CAPTURE_CHANNELS = 2
+FRAME_BYTES = 2 * CAPTURE_CHANNELS   # one 16-bit sample per channel
+BYTES_PER_SECOND = CAPTURE_RATE * 2  # 16-bit mono, after the mix
+CHUNK = 12288                        # ~64 ms of stereo per pipe read
 
 # How much audio from before the hold threshold to keep. The threshold is
 # 350 ms, so this covers a user who speaks the instant they press.
@@ -184,7 +188,7 @@ class Recorder:
     def _spawn(self) -> bool:
         command = [
             "arecord", "-q", "-D", self.device, "-t", "raw",
-            "-f", "S16_LE", "-r", str(CAPTURE_RATE), "-c", "1",
+            "-f", "S16_LE", "-r", str(CAPTURE_RATE), "-c", str(CAPTURE_CHANNELS),
         ]
         # A file, not a pipe: nobody reads it while arecord runs, and a full
         # pipe would stall the audio behind it.
@@ -236,6 +240,7 @@ class Recorder:
             return
         limit = int(self.max_seconds * BYTES_PER_SECOND)
         capped = False
+        partial = b""               # a pipe read can end inside a frame
         while not self._stop.is_set():
             try:
                 data = stream.read(CHUNK)
@@ -243,6 +248,11 @@ class Recorder:
                 break
             if not data:
                 break
+            data = partial + data
+            whole = len(data) - len(data) % FRAME_BYTES
+            data, partial = dsp.to_mono(data[:whole]), data[whole:]
+            if not data:
+                continue
             self.level = _rms(data)
             with self._lock:
                 if self._recording:

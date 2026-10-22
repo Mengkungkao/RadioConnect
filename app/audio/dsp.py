@@ -92,6 +92,21 @@ def _window(full: np.ndarray, start: int, size: int) -> np.ndarray:
     return np.pad(out, (0, size - out.size)) if out.size < size else out
 
 
+def to_mono(frames: bytes) -> bytes:
+    """Interleaved 16-bit stereo -> mono, the two channels averaged.
+
+    The cards are opened in stereo. Asked for one channel, the Whisplay card
+    on an Orange Pi Zero 2W returned the microphone about 35 dB down (a tone
+    at 0 dBFS on the left came back at -35 dBFS, 2026-10-22), and speech
+    sent from it was near silence; in stereo the microphone is intact. Which
+    side carries it depends on the codec, so both are kept, as ALSA's own
+    down-mix does: 6 dB lower when one side is silent, which the levelling
+    in prepare_speech makes up.
+    """
+    x = np.frombuffer(frames[: len(frames) & ~3], dtype="<i2").astype(np.int32)
+    return ((x[0::2] + x[1::2]) >> 1).astype("<i2").tobytes()
+
+
 def downsample(pcm48: bytes) -> bytes:
     """48 kHz 16-bit mono -> 8 kHz, filtered so nothing folds back.
 

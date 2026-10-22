@@ -9,8 +9,8 @@ device discovery returns None rather than raising, and the UI shows the
 voice path as unavailable instead of dying at startup.
 
 Everything is addressed through ALSA's `plughw:` rather than `hw:`, so
-the plug layer resamples and down-mixes whatever the codec natively
-supports to the 8 kHz mono Codec2 requires.
+the plug layer adapts the sample format. The cards are opened at 48 kHz in
+stereo; the rate and the mix to one channel are done in app.audio.dsp.
 """
 
 from __future__ import annotations

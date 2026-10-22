@@ -160,6 +160,88 @@ def test_the_card_is_opened_at_48k_and_speech_comes_back_at_8k(recorder, monkeyp
     assert len(pcm) == (kept // 2 // dsp.FACTOR) * 2
 
 
+def wait_for(condition, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+class OneSidedCard(FakeArecord):
+    """The Whisplay card as measured on an Orange Pi Zero 2W (2026-10-22):
+    in stereo the microphone is on the left and the right is silent; asked
+    for one channel, it gives the microphone 35 dB down."""
+
+    VOICE = 16000                                  # about -6 dBFS
+    FAINT = round(VOICE * 10 ** (-35 / 20))
+
+    def __init__(self, command, *args, **kwargs):
+        super().__init__(command, *args, **kwargs)
+        self.channels = int(command[command.index("-c") + 1])
+
+    def read(self, size):
+        if self._closed:
+            return b""
+        time.sleep(0.01)
+        if self.channels == 2:
+            return struct.pack("<hh", self.VOICE, 0) * (size // 4)
+        return struct.pack("<h", self.FAINT) * (size // 2)
+
+
+def test_the_microphone_on_one_side_of_a_stereo_card_is_heard(monkeypatch):
+    """The regression: RadioConnect on opi2w sent near silence ('peak -35 dBFS')
+    while the AI Chatbot, recording in stereo, heard the same microphone."""
+    from app.audio.capture import _peak_and_clipping
+
+    monkeypatch.setattr(subprocess, "Popen", OneSidedCard)
+    monkeypatch.setattr(capture.shutil, "which", lambda _name: "/usr/bin/arecord")
+    rec = Recorder("plughw:3", max_seconds=5.0)
+    try:
+        rec.start()
+        assert wait_for(lambda: rec._captured_bytes >= BYTES_PER_SECOND // 10)
+        peak, _clipped = _peak_and_clipping(b"".join(rec._captured))
+        # -6 dBFS in, mixed with a silent side: -12. One channel gave -41.
+        assert peak > -15, f"the voice came back at {peak:.0f} dBFS"
+    finally:
+        rec.close()
+
+
+def test_a_read_that_ends_inside_a_frame_keeps_the_channels_apart(monkeypatch):
+    """Pipe reads need not end on a frame: the rest waits for the next read."""
+
+    class OddReads(FakeArecord):
+        def read(self, size):
+            if self._closed:
+                return b""
+            time.sleep(0.01)
+            stream = struct.pack("<hh", 1000, 3000) * 2000
+            self._offset = getattr(self, "_offset", 0)
+            piece = stream[self._offset % 4:][:4097]
+            self._offset += len(piece)
+            return piece
+
+    monkeypatch.setattr(subprocess, "Popen", OddReads)
+    monkeypatch.setattr(capture.shutil, "which", lambda _name: "/usr/bin/arecord")
+    rec = Recorder("plughw:3", max_seconds=5.0)
+    try:
+        rec.start()
+        assert wait_for(lambda: rec._captured_bytes >= 8 * 4097 // 2)
+        mono = b"".join(rec._captured)
+        assert set(struct.unpack(f"<{len(mono) // 2}h", mono)) == {2000}
+    finally:
+        rec.close()
+
+
+def test_stereo_is_mixed_to_one_channel():
+    from app.audio import dsp
+
+    frames = struct.pack("<8h", 1000, 0, -200, 200, 32767, 32767, -32768, -32768)
+    assert struct.unpack("<4h", dsp.to_mono(frames)) == (500, 0, 32767, -32768)
+    assert dsp.to_mono(frames + b"\x01\x02") == dsp.to_mono(frames)   # part frame left
+
+
 def test_playback_goes_to_the_card_at_48k(monkeypatch):
     """Decoded speech and cues are 8 kHz; the card hears 48 kHz."""
     from app.audio import dsp, playback

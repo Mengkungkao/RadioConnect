@@ -9,9 +9,10 @@ uses WalkieTalkie's radio protocol (version 3), so it works with radios still
 running WalkieTalkie. Radios running the old Messenger use a different
 protocol and need RadioConnect to talk to it.
 
-> **Status: 0.6.1, in development.** Talk, Chats, pairing and unpairing,
+> **Status: 0.6.2, in development.** Talk, Chats, pairing and unpairing,
 > listening in the background, listen before talk, radios in range in the
-> status bar. A microphone another program holds is reported ("mic busy").
+> status bar. A microphone another program holds is reported ("mic busy");
+> the microphone is recorded in stereo and mixed to one channel.
 > SOS is next ([CONTINUE.md](CONTINUE.md)). It is not a certified emergency
 > service.
 
